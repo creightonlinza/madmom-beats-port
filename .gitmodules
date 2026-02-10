@@ -1,0 +1,6 @@
+[submodule "tools/regen/reference/madmom"]
+	path = tools/regen/reference/madmom
+	url = https://github.com/CPJKU/madmom
+[submodule "tools/regen/reference/madmom_models"]
+	path = tools/regen/reference/madmom_models
+	url = https://github.com/CPJKU/madmom_models

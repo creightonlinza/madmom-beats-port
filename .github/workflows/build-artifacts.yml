@@ -1,0 +1,123 @@
+name: Build Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Set release version
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          else
+            echo "VERSION=dev" >> $GITHUB_ENV
+          fi
+      - name: Build wasm
+        run: |
+          cd rust/rhythm_wasm
+          curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+          wasm-pack build --target web
+      - name: Collect wasm artifacts
+        run: |
+          mkdir -p dist/madmom-beats-port-${VERSION}/wasm
+          cp -R rust/rhythm_wasm/pkg/* dist/madmom-beats-port-${VERSION}/wasm/
+          cp -R models dist/madmom-beats-port-${VERSION}/wasm/models
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-madmom-beats-port-${{ env.VERSION }}
+          path: dist/madmom-beats-port-${{ env.VERSION }}/wasm
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Set release version
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          else
+            echo "VERSION=dev" >> $GITHUB_ENV
+          fi
+      - name: Build iOS static libs
+        run: |
+          rustup target add aarch64-apple-ios x86_64-apple-ios
+          cd rust
+          cargo build -p rhythm_ffi --release --target aarch64-apple-ios
+          cargo build -p rhythm_ffi --release --target x86_64-apple-ios
+      - name: Collect iOS artifacts
+        run: |
+          mkdir -p dist/madmom-beats-port-${VERSION}/ios
+          cp rust/target/aarch64-apple-ios/release/librhythm_ffi.a dist/madmom-beats-port-${VERSION}/ios/librhythm_ffi_arm64.a
+          cp rust/target/x86_64-apple-ios/release/librhythm_ffi.a dist/madmom-beats-port-${VERSION}/ios/librhythm_ffi_x86_64.a
+          cp rust/rhythm_ffi/include/rhythm.h dist/madmom-beats-port-${VERSION}/ios/
+          cp -R models dist/madmom-beats-port-${VERSION}/ios/models
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-madmom-beats-port-${{ env.VERSION }}
+          path: dist/madmom-beats-port-${{ env.VERSION }}/ios
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Set release version
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          else
+            echo "VERSION=dev" >> $GITHUB_ENV
+          fi
+      - name: Install Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+      - name: Install Rust Android targets
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+      - name: Build Android shared libs
+        run: |
+          cargo install cargo-ndk --version 3.5.4
+          cd rust
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../dist/madmom-beats-port-${VERSION}/android build -p rhythm_ffi --release
+      - name: Collect Android artifacts
+        run: |
+          cp rust/rhythm_ffi/include/rhythm.h dist/madmom-beats-port-${VERSION}/android/
+          cp -R models dist/madmom-beats-port-${VERSION}/android/models
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-madmom-beats-port-${{ env.VERSION }}
+          path: dist/madmom-beats-port-${{ env.VERSION }}/android
+
+  release:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    needs: [wasm, ios, android]
+    steps:
+      - name: Set release version
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+      - uses: actions/download-artifact@v4
+      - name: Package release assets
+        run: |
+          mkdir -p release
+          zip -r release/madmom-beats-port-${VERSION}-wasm.zip \
+            wasm-madmom-beats-port-${VERSION}
+          zip -r release/madmom-beats-port-${VERSION}-ios.zip \
+            ios-madmom-beats-port-${VERSION}
+          zip -r release/madmom-beats-port-${VERSION}-android.zip \
+            android-madmom-beats-port-${VERSION}
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*

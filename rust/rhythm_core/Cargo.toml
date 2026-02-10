@@ -1,0 +1,17 @@
+[package]
+name = "rhythm_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ndarray.workspace = true
+ndarray-npy.workspace = true
+rustfft = "6"
+
+[dev-dependencies]
+anyhow = "1"
+hound = "3"

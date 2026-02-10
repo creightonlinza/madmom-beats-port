@@ -1,0 +1,164 @@
+diff --git a/madmom/__init__.py b/madmom/__init__.py
+index 3e4e43f..21b3579 100644
+--- a/madmom/__init__.py
++++ b/madmom/__init__.py
+@@ -17,13 +17,32 @@ from __future__ import absolute_import, division, print_function
+ 
+ import doctest
+ 
+-from importlib.metadata import distribution
++from importlib.metadata import PackageNotFoundError, distribution
++from pathlib import Path
++import re
+ 
+ # import all packages
+ from . import audio, evaluation, features, io, ml, models, processors, utils
+ 
+ # define a version variable
+-__version__ = distribution("madmom")  .version
++try:
++    __version__ = distribution("madmom").version
++except PackageNotFoundError:
++    # Fallback for running from a submodule checkout without package metadata.
++    _version = "unknown"
++    try:
++        setup_py = Path(__file__).resolve().parents[1] / "setup.py"
++        if setup_py.exists():
++            match = re.search(
++                r"^version\s*=\s*['\"]([^'\"]+)['\"]",
++                setup_py.read_text(encoding="utf-8"),
++                re.MULTILINE,
++            )
++            if match:
++                _version = match.group(1)
++    except Exception:
++        _version = "unknown"
++    __version__ = _version
+ 
+ # Create a doctest output checker that optionally ignores the unicode string
+ # literal.
+diff --git a/madmom/ml/hmm.py b/madmom/ml/hmm.py
+new file mode 100644
+index 0000000..3222b20
+--- /dev/null
++++ b/madmom/ml/hmm.py
+@@ -0,0 +1,119 @@
++# encoding: utf-8
++"""
++Pure-Python fallback HMM implementation for environments without Cython build.
++This mirrors madmom.ml.hmm.pyx functionality needed by downbeat tracking.
++"""
++
++from __future__ import absolute_import, division, print_function
++
++import numpy as np
++from scipy.sparse import csr_matrix
++
++
++class TransitionModel(object):
++    def __init__(self, states, pointers, probabilities):
++        self.states = np.asarray(states, dtype=np.uint32)
++        self.pointers = np.asarray(pointers, dtype=np.uint32)
++        self.probabilities = np.asarray(probabilities, dtype=float)
++
++    @property
++    def num_states(self):
++        return len(self.pointers) - 1
++
++    @property
++    def num_transitions(self):
++        return len(self.probabilities)
++
++    @property
++    def log_probabilities(self):
++        return np.log(self.probabilities)
++
++    @staticmethod
++    def make_dense(states, pointers, probabilities):
++        transitions = csr_matrix((np.array(probabilities),
++                                  np.array(states), np.array(pointers)))
++        states, prev_states = transitions.nonzero()
++        return states, prev_states, probabilities
++
++    @staticmethod
++    def make_sparse(states, prev_states, probabilities):
++        states = np.asarray(states)
++        prev_states = np.asarray(prev_states, dtype=int)
++        probabilities = np.asarray(probabilities)
++        if not np.allclose(np.bincount(prev_states, weights=probabilities), 1):
++            raise ValueError('Not a probability distribution.')
++        num_states = max(prev_states) + 1
++        transitions = csr_matrix((probabilities, (states, prev_states)),
++                                 shape=(num_states, num_states))
++        states = transitions.indices.astype(np.uint32)
++        pointers = transitions.indptr.astype(np.uint32)
++        probabilities = transitions.data.astype(dtype=float)
++        return states, pointers, probabilities
++
++    @classmethod
++    def from_dense(cls, states, prev_states, probabilities):
++        transitions = cls.make_sparse(states, prev_states, probabilities)
++        return cls(*transitions)
++
++
++class ObservationModel(object):
++    def __init__(self, pointers):
++        self.pointers = pointers
++
++    def log_densities(self, observations):
++        raise NotImplementedError('Must be implemented by subclass.')
++
++    def densities(self, observations):
++        return np.exp(self.log_densities(observations))
++
++
++class HiddenMarkovModel(object):
++    def __init__(self, transition_model, observation_model, initial_distribution=None):
++        self.transition_model = transition_model
++        self.observation_model = observation_model
++        if initial_distribution is None:
++            initial_distribution = np.ones(transition_model.num_states,
++                                           dtype=float) / transition_model.num_states
++        if not np.allclose(initial_distribution.sum(), 1):
++            raise ValueError('Initial distribution is not a probability distribution.')
++        self.initial_distribution = initial_distribution
++        self._prev = self.initial_distribution.copy()
++
++    def reset(self, initial_distribution=None):
++        self._prev = initial_distribution or self.initial_distribution.copy()
++
++    def viterbi(self, observations):
++        tm = self.transition_model
++        om = self.observation_model
++        num_states = tm.num_states
++        num_observations = len(observations)
++        om_densities = om.log_densities(observations)
++
++        current = np.empty(num_states, dtype=float)
++        previous = np.log(self.initial_distribution)
++        bt_pointers = np.empty((num_observations, num_states), dtype=np.uint32)
++
++        for frame in range(num_observations):
++            for state in range(num_states):
++                current[state] = -np.inf
++                density = om_densities[frame, om.pointers[state]]
++                start = tm.pointers[state]
++                end = tm.pointers[state + 1]
++                for pointer in range(start, end):
++                    prev_state = tm.states[pointer]
++                    transition_prob = previous[prev_state] + tm.log_probabilities[pointer] + density
++                    if transition_prob > current[state]:
++                        current[state] = transition_prob
++                        bt_pointers[frame, state] = prev_state
++            previous[:] = current
++
++        state = np.asarray(current).argmax()
++        log_probability = current[state]
++        if np.isinf(log_probability):
++            return np.empty(0, dtype=np.uint32), log_probability
++
++        path = np.empty(num_observations, dtype=np.uint32)
++        for frame in range(num_observations - 1, -1, -1):
++            path[frame] = state
++            state = bt_pointers[frame, state]
++        return path, log_probability
