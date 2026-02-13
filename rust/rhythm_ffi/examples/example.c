@@ -27,7 +27,7 @@ int main(void) {
     }
 
     printf("Analysis JSON length: %zu\n", strlen(json));
-    // Parse JSON and count beats/downbeats using your JSON library of choice.
+    // Parse JSON beat_times/beat_numbers/beat_confidences with your JSON library.
     // This example only demonstrates ownership and freeing.
 
     rhythm_free_string(json);

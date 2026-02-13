@@ -8,10 +8,8 @@ mod model;
 mod types;
 
 pub use config::{CoreConfig, DbnConfig, FeatureConfig, ModelConfig};
-pub use types::{
-    ActivationOutput, AnalysisOutput, BeatEvent, DownbeatEvent, ProgressEvent, ProgressSink,
-    ProgressStage,
-};
+use types::BeatEvent;
+pub use types::{AnalysisOutput, ProgressEvent, ProgressSink, ProgressStage};
 
 use thiserror::Error;
 
@@ -29,7 +27,7 @@ pub enum RhythmError {
 
 /// Analyze a full track of mono PCM samples at 44.1kHz.
 ///
-/// Returns per-frame activations and decoded beat/downbeat events.
+/// Returns beat arrays.
 pub fn analyze(
     samples: &[f32],
     sample_rate: u32,
@@ -78,12 +76,8 @@ pub fn analyze_with_progress(
 
     let features = features::compute_features(samples, config, sink)?;
     let activations = model::run_inference(&features, config, sink)?;
-    let events = dbn::decode(&activations, config, sink)?;
-
-    Ok(AnalysisOutput {
-        activations,
-        events,
-    })
+    let beats = dbn::decode(&activations, config, sink)?;
+    build_analysis_output(beats, config.feature.fps)
 }
 
 /// Analyze using in-memory model data and optional progress callbacks.
@@ -110,11 +104,48 @@ pub fn analyze_with_progress_and_model_data(
 
     let features = features::compute_features(samples, config, sink)?;
     let activations = model::run_inference_with_data(&features, model_json, weights_npz, sink)?;
-    let events = dbn::decode(&activations, config, sink)?;
+    let beats = dbn::decode(&activations, config, sink)?;
+    build_analysis_output(beats, config.feature.fps)
+}
+
+fn build_analysis_output(beats: Vec<BeatEvent>, fps: f32) -> Result<AnalysisOutput, RhythmError> {
+    if !fps.is_finite() || fps <= 0.0 {
+        return Err(RhythmError::InvalidInput("invalid fps".to_string()));
+    }
+    let fps = fps.round() as u32;
+
+    let mut beat_times = Vec::with_capacity(beats.len());
+    let mut beat_numbers = Vec::with_capacity(beats.len());
+    let mut beat_confidences = Vec::with_capacity(beats.len());
+
+    let mut last_time = f32::NEG_INFINITY;
+    for event in beats {
+        if !event.time_sec.is_finite() {
+            return Err(RhythmError::Model(
+                "non-finite beat time in decode output".to_string(),
+            ));
+        }
+        if event.time_sec <= last_time {
+            return Err(RhythmError::Model(
+                "non-increasing beat time in decode output".to_string(),
+            ));
+        }
+        if event.beat_in_bar == 0 {
+            return Err(RhythmError::Model(
+                "invalid beat_in_bar in decode output".to_string(),
+            ));
+        }
+        beat_times.push(event.time_sec);
+        beat_numbers.push(event.beat_in_bar as u32);
+        beat_confidences.push(event.confidence.clamp(0.0, 1.0));
+        last_time = event.time_sec;
+    }
 
     Ok(AnalysisOutput {
-        activations,
-        events,
+        fps,
+        beat_times,
+        beat_numbers,
+        beat_confidences,
     })
 }
 

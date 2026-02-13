@@ -7,7 +7,19 @@ C ABI wrapper around `rhythm_core`.
 `include/rhythm.h` declares the public C API. The caller owns any strings
 returned from the ABI and must free them with `rhythm_free_string`.
 
+`rhythm_analyze_json*` returns beat arrays:
+
+```json
+{
+  "fps": 100,
+  "beat_times": [0.2059, 0.645],
+  "beat_numbers": [1, 2],
+  "beat_confidences": [0.83, 0.79]
+}
+```
+
 Ownership rules:
+
 - `rhythm_analyze_json` returns a newly allocated C string; caller must call `rhythm_free_string`.
 - `rhythm_last_error_message` returns a newly allocated C string; caller must call `rhythm_free_string`.
 - Input samples remain owned by the caller.
@@ -22,6 +34,7 @@ cargo build -p rhythm_ffi --release
 ```
 
 Outputs:
+
 - `target/release/librhythm_ffi.a`
 - `target/release/librhythm_ffi.dylib` (macOS)
 
@@ -36,6 +49,7 @@ typedef void (*rhythm_progress_cb)(uint32_t stage, float progress, void *user_da
 ```
 
 Stages:
+
 - 0: features
 - 1: inference
 - 2: DBN decode
