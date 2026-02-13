@@ -8,13 +8,19 @@
 extern "C" {
 #endif
 
-// Analyze mono PCM samples and return a JSON string with activations and events.
+// Analyze mono PCM samples and return beat arrays as JSON:
+// {
+//   "fps": 100,
+//   "beat_times": [...],
+//   "beat_numbers": [...],
+//   "beat_confidences": [...]
+// }
 // Returns NULL on error; call rhythm_last_error_message() for details.
 // The returned string must be freed with rhythm_free_string().
 char *rhythm_analyze_json(const float *samples,
-                                size_t samples_len,
-                                uint32_t sample_rate,
-                                const char *config_json);
+                          size_t samples_len,
+                          uint32_t sample_rate,
+                          const char *config_json);
 
 typedef void (*rhythm_progress_cb)(uint32_t stage, float progress, void *user_data);
 

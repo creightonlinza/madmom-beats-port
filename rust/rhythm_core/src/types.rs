@@ -1,36 +1,24 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActivationOutput {
-    /// Per-frame beat activation probabilities.
+#[derive(Debug, Clone)]
+pub(crate) struct ActivationOutput {
     pub beat: Vec<f32>,
-    /// Per-frame downbeat activation probabilities.
     pub downbeat: Vec<f32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BeatEvent {
-    pub time_sec: f32,
-    pub confidence: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownbeatEvent {
+#[derive(Debug, Clone)]
+pub(crate) struct BeatEvent {
     pub time_sec: f32,
     pub beat_in_bar: usize,
     pub confidence: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DecodedEvents {
-    pub beats: Vec<BeatEvent>,
-    pub downbeats: Vec<DownbeatEvent>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisOutput {
-    pub activations: ActivationOutput,
-    pub events: DecodedEvents,
+    pub fps: u32,
+    pub beat_times: Vec<f32>,
+    pub beat_numbers: Vec<u32>,
+    pub beat_confidences: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

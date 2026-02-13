@@ -1,14 +1,11 @@
-use crate::types::{
-    ActivationOutput, BeatEvent, DecodedEvents, DownbeatEvent, ProgressEvent, ProgressSink,
-    ProgressStage,
-};
+use crate::types::{ActivationOutput, BeatEvent, ProgressEvent, ProgressSink, ProgressStage};
 use crate::{CoreConfig, RhythmError};
 
 pub fn decode(
     activations: &ActivationOutput,
     config: &CoreConfig,
     progress: &mut dyn ProgressSink,
-) -> Result<DecodedEvents, RhythmError> {
+) -> Result<Vec<BeatEvent>, RhythmError> {
     progress.on_progress(ProgressEvent {
         stage: ProgressStage::Dbn,
         progress: 0.0,
@@ -34,10 +31,7 @@ pub fn decode(
             stage: ProgressStage::Dbn,
             progress: 1.0,
         });
-        return Ok(DecodedEvents {
-            beats: Vec::new(),
-            downbeats: Vec::new(),
-        });
+        return Ok(Vec::new());
     }
 
     let hmms = build_hmms(config)?;
@@ -64,32 +58,39 @@ pub fn decode(
         beat_numbers.push(pos.floor() as usize + 1);
     }
 
-    let beat_indices = if config.dbn.correct {
+    let mut beat_indices = if config.dbn.correct {
         corrected_beats(&act, &best_path, om)?
     } else {
         transitions(&beat_numbers)
     };
 
-    let mut beats = Vec::new();
-    let mut downbeats = Vec::new();
+    beat_indices.sort_unstable();
+    beat_indices.dedup();
 
-    for &idx in &beat_indices {
-        let frame = idx + first;
-        let time_sec = (frame as f32) / fps;
-        let beat_in_bar = beat_numbers[idx];
-        let confidence = act[idx][0];
+    let (refined_indices, peaks) = refine_beat_indices(&beat_indices, &act);
+    let energy = frame_energy(&act);
+    let confidences = normalized_peak_confidences(&energy, &peaks);
+
+    let mut beats = Vec::with_capacity(beat_indices.len());
+    let mut previous_time: Option<f32> = None;
+    for (event_idx, &idx) in beat_indices.iter().enumerate() {
+        let raw_time_sec = ((idx + first) as f32) / fps;
+        let mut time_sec = (refined_indices[event_idx] + first as f32) / fps;
+        // Keep output strictly time-ascending and deterministic.
+        if let Some(prev) = previous_time {
+            if time_sec <= prev {
+                time_sec = raw_time_sec;
+            }
+            if time_sec <= prev {
+                time_sec = f32::from_bits(prev.to_bits() + 1);
+            }
+        }
+        previous_time = Some(time_sec);
         beats.push(BeatEvent {
             time_sec,
-            confidence,
+            beat_in_bar: beat_numbers[idx],
+            confidence: confidences[event_idx],
         });
-        if beat_in_bar == 1 {
-            let db_conf = act[idx][1];
-            downbeats.push(DownbeatEvent {
-                time_sec,
-                beat_in_bar,
-                confidence: db_conf,
-            });
-        }
     }
 
     progress.on_progress(ProgressEvent {
@@ -97,7 +98,7 @@ pub fn decode(
         progress: 1.0,
     });
 
-    Ok(DecodedEvents { beats, downbeats })
+    Ok(beats)
 }
 
 fn threshold_activations(data: &[[f32; 2]], threshold: f32) -> (Vec<[f32; 2]>, usize) {
@@ -117,6 +118,70 @@ fn threshold_activations(data: &[[f32; 2]], threshold: f32) -> (Vec<[f32; 2]>, u
         return (Vec::new(), 0);
     }
     (data[first..last].to_vec(), first)
+}
+
+fn frame_energy(activations: &[[f32; 2]]) -> Vec<f32> {
+    activations.iter().map(|v| v[0] + v[1]).collect()
+}
+
+fn refine_beat_indices(indices: &[usize], activations: &[[f32; 2]]) -> (Vec<f32>, Vec<usize>) {
+    let energy = frame_energy(activations);
+    let count = energy.len();
+    let mut refined = Vec::with_capacity(indices.len());
+    let mut peaks = Vec::with_capacity(indices.len());
+
+    for &idx in indices {
+        if idx == 0 || idx + 1 >= count {
+            refined.push(idx as f32);
+            peaks.push(idx);
+            continue;
+        }
+
+        let left = idx.saturating_sub(1);
+        let right = (idx + 1).min(count - 1);
+        let mut peak = left;
+        let mut best = f32::NEG_INFINITY;
+        for (offset, value) in energy[left..=right].iter().enumerate() {
+            if *value > best {
+                best = *value;
+                peak = left + offset;
+            }
+        }
+        peaks.push(peak);
+
+        if peak == 0 || peak + 1 >= count {
+            refined.push(peak as f32);
+            continue;
+        }
+
+        let y1 = energy[peak - 1] as f64;
+        let y2 = energy[peak] as f64;
+        let y3 = energy[peak + 1] as f64;
+        let denom = y1 - 2.0 * y2 + y3;
+        if denom.abs() < 1e-12 {
+            refined.push(peak as f32);
+            continue;
+        }
+        let delta = (0.5 * (y1 - y3) / denom).clamp(-0.5, 0.5);
+        refined.push(peak as f32 + delta as f32);
+    }
+
+    (refined, peaks)
+}
+
+fn normalized_peak_confidences(energy: &[f32], peaks: &[usize]) -> Vec<f32> {
+    if energy.is_empty() {
+        return vec![0.5; peaks.len()];
+    }
+    let min_e = energy.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_e = energy.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if (max_e - min_e).abs() < 1e-6 {
+        return vec![0.5; peaks.len()];
+    }
+    peaks
+        .iter()
+        .map(|&peak| ((energy[peak] - min_e) / (max_e - min_e)).clamp(0.0, 1.0))
+        .collect()
 }
 
 fn transitions(beat_numbers: &[usize]) -> Vec<usize> {

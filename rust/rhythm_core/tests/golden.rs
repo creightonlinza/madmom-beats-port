@@ -2,27 +2,18 @@ use rhythm_core::{analyze, CoreConfig};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-const ACTIVATION_TOLERANCE: f32 = 1e-3;
 const FRAME_TOLERANCE_SEC: f32 = 0.005;
+const CONFIDENCE_TOLERANCE: f32 = 0.01;
 
 #[derive(Debug, Deserialize)]
 struct GoldenEvents {
     beats: Vec<GoldenBeat>,
-    downbeats: Vec<GoldenDownbeat>,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct GoldenBeat {
     time_sec: f32,
-    confidence: f32,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct GoldenDownbeat {
-    time_sec: f32,
-    beat_in_bar: usize,
+    beat_in_bar: u32,
     confidence: f32,
 }
 
@@ -76,55 +67,9 @@ fn load_wav_mono(path: &PathBuf) -> (Vec<f32>, u32) {
     (samples, spec.sample_rate)
 }
 
-fn load_activation_arrays(path: &PathBuf) -> (Vec<f32>, Vec<f32>) {
-    use ndarray::{Ix1, OwnedRepr};
-    use ndarray_npy::NpzReader;
-    use std::fs::File;
-    let file = File::open(path).expect("activations.npz missing");
-    let mut npz = NpzReader::new(file).expect("npz open failed");
-    let beat = npz
-        .by_name::<OwnedRepr<f32>, Ix1>("beat.npy")
-        .expect("beat array missing")
-        .to_vec();
-    let downbeat = npz
-        .by_name::<OwnedRepr<f32>, Ix1>("downbeat.npy")
-        .expect("downbeat array missing")
-        .to_vec();
-    (beat, downbeat)
-}
-
 fn load_events(path: &PathBuf) -> GoldenEvents {
     let data = std::fs::read_to_string(path).expect("events.json missing");
     serde_json::from_str(&data).expect("invalid events.json")
-}
-
-fn compare_activations(expected: &[f32], actual: &[f32], label: &str) {
-    assert_eq!(
-        expected.len(),
-        actual.len(),
-        "length mismatch for {}",
-        label
-    );
-    let mut max_diff = 0.0f32;
-    let len = expected.len();
-    let progress_step = if len >= 200_000 { len / 10 } else { 0 };
-    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
-        if progress_step > 0 && i % progress_step == 0 {
-            let pct = (i as f32 / len as f32) * 100.0;
-            println!("activation compare {}: {:.0}%", label, pct);
-        }
-        let diff = (e - a).abs();
-        if diff > max_diff {
-            max_diff = diff;
-        }
-    }
-    assert!(
-        max_diff <= ACTIVATION_TOLERANCE,
-        "max diff {} for {} exceeds tolerance {}",
-        max_diff,
-        label,
-        ACTIVATION_TOLERANCE
-    );
 }
 
 fn compare_event_times(expected: &[f32], actual: &[f32], label: &str) {
@@ -141,6 +86,19 @@ fn compare_event_times(expected: &[f32], actual: &[f32], label: &str) {
             "event {} in {} differs by {}s",
             i,
             label,
+            diff
+        );
+    }
+}
+
+fn compare_confidences(expected: &[f32], actual: &[f32]) {
+    assert_eq!(expected.len(), actual.len(), "confidence count mismatch");
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (e - a).abs();
+        assert!(
+            diff <= CONFIDENCE_TOLERANCE,
+            "confidence {} differs by {}",
+            i,
             diff
         );
     }
@@ -181,7 +139,6 @@ fn golden_parity_all() {
         }
         let golden_dir = golden_root.join(&name);
         let audio_path = audio_root.join(format!("{}.wav", name));
-        let activations_path = golden_dir.join("activations.npz");
         let events_path = golden_dir.join("events.json");
 
         println!("fixture {}: loading audio", name);
@@ -197,34 +154,64 @@ fn golden_parity_all() {
         let output = analyze(&samples, config.feature.sample_rate, &config)
             .unwrap_or_else(|e| panic!("analysis failed for {}: {}", name, e));
         println!("fixture {}: analyze done in {:.2?}", name, t0.elapsed());
+        assert_eq!(
+            output.fps,
+            config.feature.fps.round() as u32,
+            "fps mismatch"
+        );
 
         println!("fixture {}: loading goldens", name);
-        let (beat_gold, downbeat_gold) = load_activation_arrays(&activations_path);
-        compare_activations(&beat_gold, &output.activations.beat, "beat");
-        compare_activations(&downbeat_gold, &output.activations.downbeat, "downbeat");
-
         let events = load_events(&events_path);
         let beat_times_gold: Vec<f32> = events.beats.iter().map(|b| b.time_sec).collect();
-        let beat_times: Vec<f32> = output.events.beats.iter().map(|b| b.time_sec).collect();
-        compare_event_times(&beat_times_gold, &beat_times, "beats");
+        compare_event_times(&beat_times_gold, &output.beat_times, "beats");
 
-        let downbeat_times_gold: Vec<f32> = events.downbeats.iter().map(|b| b.time_sec).collect();
-        let downbeat_times: Vec<f32> = output.events.downbeats.iter().map(|b| b.time_sec).collect();
-        compare_event_times(&downbeat_times_gold, &downbeat_times, "downbeats");
-
-        let downbeat_numbers_gold: Vec<usize> =
-            events.downbeats.iter().map(|b| b.beat_in_bar).collect();
-        let downbeat_numbers: Vec<usize> = output
-            .events
-            .downbeats
-            .iter()
-            .map(|b| b.beat_in_bar)
-            .collect();
+        let beat_numbers_gold: Vec<u32> = events.beats.iter().map(|b| b.beat_in_bar).collect();
         assert_eq!(
-            downbeat_numbers_gold, downbeat_numbers,
-            "downbeat beat_in_bar mismatch for {}",
+            beat_numbers_gold, output.beat_numbers,
+            "beats beat_in_bar mismatch for {}",
             name
         );
+
+        let beat_conf_gold: Vec<f32> = events.beats.iter().map(|b| b.confidence).collect();
+        compare_confidences(&beat_conf_gold, &output.beat_confidences);
+
+        assert_eq!(
+            output.beat_times.len(),
+            output.beat_numbers.len(),
+            "beat_times/beat_numbers length mismatch for {}",
+            name
+        );
+        assert_eq!(
+            output.beat_times.len(),
+            output.beat_confidences.len(),
+            "beat_times/beat_confidences length mismatch for {}",
+            name
+        );
+
+        for i in 1..output.beat_times.len() {
+            assert!(
+                output.beat_times[i] > output.beat_times[i - 1],
+                "non-increasing beat_times at index {} for {}",
+                i,
+                name
+            );
+        }
+        for beat_number in &output.beat_numbers {
+            assert!(
+                *beat_number >= 1,
+                "invalid beat_number {} in {}",
+                beat_number,
+                name
+            );
+        }
+        for confidence in &output.beat_confidences {
+            assert!(
+                (0.0..=1.0).contains(confidence),
+                "invalid confidence {} in {}",
+                confidence,
+                name
+            );
+        }
         println!("fixture {}: parity ok", name);
     }
 }
