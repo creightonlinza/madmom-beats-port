@@ -1,0 +1,60 @@
+name: CI Build Checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  wasm:
+    name: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - name: Build wasm package
+        run: |
+          cd rust/rhythm_wasm
+          wasm-pack build --target web --release
+
+  ios:
+    name: ios
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add iOS targets
+        run: rustup target add aarch64-apple-ios x86_64-apple-ios
+      - name: Build iOS FFI libs
+        run: |
+          cd rust
+          cargo build -p rhythm_ffi --release --target aarch64-apple-ios
+          cargo build -p rhythm_ffi --release --target x86_64-apple-ios
+
+  android:
+    name: android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+      - name: Add Android targets
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked --version 3.5.4
+      - name: Build Android FFI libs
+        run: |
+          cd rust
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../dist/ci-android \
+            build -p rhythm_ffi --release
