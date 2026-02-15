@@ -35,6 +35,15 @@ The C ABI in `rust/rhythm_ffi` builds as a `staticlib` and `cdylib`. Integrate v
 - FFI (C/Swift/JNI): `rust/rhythm_ffi/README.md`
 - WASM (Web Worker/JS): `rust/rhythm_wasm/README.md`
 - Public C header: `rust/rhythm_ffi/include/rhythm.h`
+- Android JNI + CMake sample: `docs/android/jni-cmake-sample.md`
+
+## Config/output schema
+
+Versioned JSON schemas are published for all platforms:
+
+- `docs/schemas/config.v1.schema.json`
+- `docs/schemas/analysis-output.v1.schema.json`
+- `docs/schemas/config.v1.example.json`
 
 ## Output contract
 
@@ -107,6 +116,6 @@ Regen tooling is archived under `tools/regen/` and not used by CI. See
 
 ## Versioning
 
-Releases use semantic versioning with tags like `v1.0.0`. All artifacts
+Releases use semantic versioning with tags like `v3.0.0`. All artifacts
 (Rust core, FFI, WASM, models) are versioned together and should be treated as
 a single unit.

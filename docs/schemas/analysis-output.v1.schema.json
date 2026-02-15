@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/madmom-beats-port/madmom-beats-port/blob/main/docs/schemas/analysis-output.v1.schema.json",
+  "title": "madmom-beats-port AnalysisOutput v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fps",
+    "beat_times",
+    "beat_numbers",
+    "beat_confidences"
+  ],
+  "properties": {
+    "fps": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "beat_times": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      }
+    },
+    "beat_numbers": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "beat_confidences": {
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      }
+    }
+  },
+  "$comment": "beat_times, beat_numbers, and beat_confidences are expected to have identical lengths."
+}

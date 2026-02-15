@@ -34,11 +34,48 @@ char *rhythm_analyze_json_with_progress(const float *samples,
                                         rhythm_progress_cb progress_cb,
                                         void *user_data);
 
+// Return default config JSON (pretty-printed).
+// The returned string must be freed with rhythm_free_string().
+char *rhythm_default_config_json(void);
+
+// Validate config JSON.
+// Returns NULL on success. On validation error, returns a JSON payload:
+// {"code":<u32>,"code_name":"...","message":"...","path":"...","context":"..."}.
+// The returned string must be freed with rhythm_free_string().
+char *rhythm_validate_config_json(const char *config_json);
+
 // Returns the last error message as a newly allocated string.
 // The returned string must be freed with rhythm_free_string().
 char *rhythm_last_error_message(void);
 
-// Free a string returned by rhythm_analyze_json or rhythm_last_error_message.
+// Returns numeric error code for the last error:
+// 0 OK
+// 1 NULL_POINTER
+// 2 UTF8_ERROR
+// 3 CONFIG_PARSE_ERROR
+// 4 CONFIG_VALIDATION_ERROR
+// 5 INVALID_INPUT
+// 6 MODEL_ERROR
+// 7 IO_ERROR
+// 8 NOT_IMPLEMENTED
+// 9 JSON_ERROR
+// 10 INTERNAL_ERROR
+uint32_t rhythm_last_error_code(void);
+
+// Returns the last error as JSON payload:
+// {"code":<u32>,"code_name":"...","message":"...","path":"...","context":"..."}.
+// The returned string must be freed with rhythm_free_string().
+char *rhythm_last_error_json(void);
+
+// Progress stage IDs:
+// 0 features
+// 1 inference
+// 2 DBN decode
+//
+// Cancellation: not supported in v3.0.0. If cancellation is needed, call from a
+// worker thread and stop waiting on the caller side.
+
+// Free a string returned by this library.
 void rhythm_free_string(char *s);
 
 #ifdef __cplusplus

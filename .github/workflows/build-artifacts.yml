@@ -98,7 +98,7 @@ jobs:
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
       - name: Build Android shared libs
         env:
-          RUSTFLAGS: -C link-arg=-Wl,-z,max-page-size=16384
+          RUSTFLAGS: -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-soname,librhythm_ffi.so
         run: |
           cargo install cargo-ndk --locked --version 3.5.4
           cd rust

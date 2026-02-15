@@ -7,7 +7,9 @@ mod io;
 mod model;
 mod types;
 
-pub use config::{CoreConfig, DbnConfig, FeatureConfig, ModelConfig};
+pub use config::{
+    validate_core_config, ConfigValidationIssue, CoreConfig, DbnConfig, FeatureConfig, ModelConfig,
+};
 use types::BeatEvent;
 pub use types::{AnalysisOutput, ProgressEvent, ProgressSink, ProgressStage};
 
@@ -61,6 +63,9 @@ pub fn analyze_with_progress(
     config: &CoreConfig,
     progress: Option<&mut dyn ProgressSink>,
 ) -> Result<AnalysisOutput, RhythmError> {
+    if let Err(issue) = validate_core_config(config) {
+        return Err(RhythmError::InvalidInput(format!("config {}", issue)));
+    }
     if sample_rate != config.feature.sample_rate {
         return Err(RhythmError::InvalidInput(format!(
             "expected {} Hz mono samples; got {}",
@@ -89,6 +94,9 @@ pub fn analyze_with_progress_and_model_data(
     model_json: &str,
     weights_npz: &[u8],
 ) -> Result<AnalysisOutput, RhythmError> {
+    if let Err(issue) = validate_core_config(config) {
+        return Err(RhythmError::InvalidInput(format!("config {}", issue)));
+    }
     if sample_rate != config.feature.sample_rate {
         return Err(RhythmError::InvalidInput(format!(
             "expected {} Hz mono samples; got {}",
