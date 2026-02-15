@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/madmom-beats-port/madmom-beats-port/blob/main/docs/schemas/config.v1.schema.json",
+  "title": "madmom-beats-port CoreConfig v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "feature",
+    "model",
+    "dbn"
+  ],
+  "properties": {
+    "feature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sample_rate",
+        "fps",
+        "frame_sizes",
+        "num_bands",
+        "fmin",
+        "fmax",
+        "diff_ratio",
+        "positive_diffs"
+      ],
+      "properties": {
+        "sample_rate": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "frame_sizes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "num_bands": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "fmin": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "fmax": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "diff_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "positive_diffs": {
+          "type": "boolean"
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_json",
+        "weights_npz"
+      ],
+      "properties": {
+        "model_json": {
+          "type": "string",
+          "minLength": 1
+        },
+        "weights_npz": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "dbn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "beats_per_bar",
+        "min_bpm",
+        "max_bpm",
+        "num_tempi",
+        "transition_lambda",
+        "observation_lambda",
+        "threshold",
+        "correct"
+      ],
+      "properties": {
+        "beats_per_bar": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "min_bpm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "max_bpm": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "num_tempi": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "transition_lambda": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "observation_lambda": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "correct": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

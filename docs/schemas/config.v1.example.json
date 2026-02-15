@@ -1,0 +1,37 @@
+{
+  "feature": {
+    "sample_rate": 44100,
+    "fps": 100.0,
+    "frame_sizes": [
+      1024,
+      2048,
+      4096
+    ],
+    "num_bands": [
+      3,
+      6,
+      12
+    ],
+    "fmin": 30.0,
+    "fmax": 17000.0,
+    "diff_ratio": 0.5,
+    "positive_diffs": true
+  },
+  "model": {
+    "model_json": "/data/user/0/<app>/files/rhythm_models/downbeats_blstm.json",
+    "weights_npz": "/data/user/0/<app>/files/rhythm_models/downbeats_blstm_weights.npz"
+  },
+  "dbn": {
+    "beats_per_bar": [
+      3,
+      4
+    ],
+    "min_bpm": 55.0,
+    "max_bpm": 215.0,
+    "num_tempi": 60,
+    "transition_lambda": 100.0,
+    "observation_lambda": 16,
+    "threshold": 0.05,
+    "correct": true
+  }
+}

@@ -65,7 +65,7 @@ jobs:
         run: cargo install cargo-ndk --locked --version 3.5.4
       - name: Build Android FFI libs
         env:
-          RUSTFLAGS: -C link-arg=-Wl,-z,max-page-size=16384
+          RUSTFLAGS: -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-soname,librhythm_ffi.so
         run: |
           cd rust
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../dist/ci-android \

@@ -72,6 +72,16 @@ for so_file in "${so_files[@]}"; do
       status=1
     fi
   done
+
+  soname="$("$READELF_BIN" -dW "$so_file" | awk -F'[][]' '/SONAME/ { print $2; exit }')"
+  expected_soname="$(basename "$so_file")"
+  if [[ -z "$soname" ]]; then
+    echo "FAIL: $so_file is missing SONAME (expected $expected_soname)" >&2
+    status=1
+  elif [[ "$soname" != "$expected_soname" ]]; then
+    echo "FAIL: $so_file has SONAME $soname (expected $expected_soname)" >&2
+    status=1
+  fi
 done
 
 for abi in "${REQUIRED_ABIS[@]}"; do
@@ -85,4 +95,4 @@ if [[ $status -ne 0 ]]; then
   exit $status
 fi
 
-echo "PASS: all Android shared libraries use 16 KB LOAD alignment (0x4000)."
+echo "PASS: all Android shared libraries use 16 KB LOAD alignment (0x4000) and stable SONAME."
