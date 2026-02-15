@@ -107,6 +107,6 @@ Regen tooling is archived under `tools/regen/` and not used by CI. See
 
 ## Versioning
 
-Releases use semantic versioning with tags like `v2.0.0`. All artifacts
+Releases use semantic versioning with tags like `v1.0.0`. All artifacts
 (Rust core, FFI, WASM, models) are versioned together and should be treated as
 a single unit.
