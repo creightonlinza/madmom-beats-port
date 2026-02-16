@@ -22,7 +22,7 @@ jobs:
         run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
       - name: Build wasm package
         run: |
-          cd rust/rhythm_wasm
+          cd rust/madmom_beats_port_wasm
           wasm-pack build --target web --release
 
   ios:
@@ -36,8 +36,8 @@ jobs:
       - name: Build iOS FFI libs
         run: |
           cd rust
-          cargo build -p rhythm_ffi --release --target aarch64-apple-ios
-          cargo build -p rhythm_ffi --release --target x86_64-apple-ios
+          cargo build -p madmom_beats_port_ffi --release --target aarch64-apple-ios
+          cargo build -p madmom_beats_port_ffi --release --target x86_64-apple-ios
 
   android:
     name: android
@@ -65,10 +65,10 @@ jobs:
         run: cargo install cargo-ndk --locked --version 3.5.4
       - name: Build Android FFI libs
         env:
-          RUSTFLAGS: -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-soname,librhythm_ffi.so
+          RUSTFLAGS: -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-soname,libmadmom_beats_port_ffi.so
         run: |
           cd rust
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../dist/ci-android \
-            build -p rhythm_ffi --release
+            build -p madmom_beats_port_ffi --release
       - name: Verify Android ELF 16 KB page-size compatibility
         run: tools/verify_16kb_android.sh dist/ci-android
