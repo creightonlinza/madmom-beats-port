@@ -1,4 +1,4 @@
-use rhythm_core::{analyze, CoreConfig};
+use madmom_beats_port_core::{analyze, CoreConfig};
 use serde::Deserialize;
 use std::path::PathBuf;
 

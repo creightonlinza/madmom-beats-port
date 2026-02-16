@@ -13,28 +13,28 @@ implementation under `tools/regen/reference/madmom` on golden fixtures.
 
 ```bash
 cd rust
-cargo build -p rhythm_core
-cargo build -p rhythm_ffi
+cargo build -p madmom_beats_port_core
+cargo build -p madmom_beats_port_ffi
 ```
 
 ### WASM
 
 ```bash
-cd rust/rhythm_wasm
+cd rust/madmom_beats_port_wasm
 wasm-pack build --target web
 ```
 
-The WASM build outputs a distributable package under `rust/rhythm_wasm/pkg/`.
+The WASM build outputs a distributable package under `rust/madmom_beats_port_wasm/pkg/`.
 
 ### iOS / Android
 
-The C ABI in `rust/rhythm_ffi` builds as a `staticlib` and `cdylib`. Integrate via your platform build system (Xcode/Gradle). The exported API is declared in `rust/rhythm_ffi/include/rhythm.h` and documented in `rust/rhythm_ffi/README.md`.
+The C ABI in `rust/madmom_beats_port_ffi` builds as a `staticlib` and `cdylib`. Integrate via your platform build system (Xcode/Gradle). The exported API is declared in `rust/madmom_beats_port_ffi/include/madmom_beats_port.h` and documented in `rust/madmom_beats_port_ffi/README.md`.
 
 ## Usage
 
-- FFI (C/Swift/JNI): `rust/rhythm_ffi/README.md`
-- WASM (Web Worker/JS): `rust/rhythm_wasm/README.md`
-- Public C header: `rust/rhythm_ffi/include/rhythm.h`
+- FFI (C/Swift/JNI): `rust/madmom_beats_port_ffi/README.md`
+- WASM (Web Worker/JS): `rust/madmom_beats_port_wasm/README.md`
+- Public C header: `rust/madmom_beats_port_ffi/include/madmom_beats_port.h`
 - Android JNI + CMake sample: `docs/android/jni-cmake-sample.md`
 
 ## Config/output schema
@@ -74,13 +74,13 @@ under `fixtures/golden/` and expects matching audio in `fixtures/audio/`.
 To run parity tests in release mode, set:
 
 ```bash
-cargo test -p rhythm_core --test golden --release
+cargo test -p madmom_beats_port_core --test golden --release
 ```
 
 To run a single fixture by name:
 
 ```bash
-FIXTURE=clap_snare_loop_carrai_pass cargo test -p rhythm_core --test golden --release
+FIXTURE=clap_snare_loop_carrai_pass cargo test -p madmom_beats_port_core --test golden --release
 ```
 
 ## Model export
@@ -116,6 +116,6 @@ Regen tooling is archived under `tools/regen/` and not used by CI. See
 
 ## Versioning
 
-Releases use semantic versioning with tags like `v3.0.0`. All artifacts
+Releases use semantic versioning with tags like `v4.0.0`. All artifacts
 (Rust core, FFI, WASM, models) are versioned together and should be treated as
 a single unit.

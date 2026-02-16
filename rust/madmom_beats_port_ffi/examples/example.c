@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../include/rhythm.h"
+#include "../include/madmom_beats_port.h"
 
 static float *load_samples_stub(size_t *out_len) {
     *out_len = 0;
@@ -17,11 +17,11 @@ int main(void) {
         return 1;
     }
 
-    char *json = rhythm_analyze_json(samples, samples_len, 44100, NULL);
+    char *json = madmom_beats_port_analyze_json(samples, samples_len, 44100, NULL);
     if (!json) {
-        char *err = rhythm_last_error_message();
-        fprintf(stderr, "rhythm_analyze_json failed: %s\n", err ? err : "unknown error");
-        rhythm_free_string(err);
+        char *err = madmom_beats_port_last_error_message();
+        fprintf(stderr, "madmom_beats_port_analyze_json failed: %s\n", err ? err : "unknown error");
+        madmom_beats_port_free_string(err);
         free(samples);
         return 1;
     }
@@ -30,7 +30,7 @@ int main(void) {
     // Parse JSON beat_times/beat_numbers/beat_confidences with your JSON library.
     // This example only demonstrates ownership and freeing.
 
-    rhythm_free_string(json);
+    madmom_beats_port_free_string(json);
     free(samples);
     return 0;
 }

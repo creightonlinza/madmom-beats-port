@@ -18,7 +18,7 @@ pub fn compute_features(
     if samples.is_empty() {
         return Err(RhythmError::InvalidInput("samples empty".to_string()));
     }
-    let log_progress = std::env::var("RHYTHM_PROGRESS").ok().as_deref() == Some("1");
+    let log_progress = std::env::var("MADMOM_BEATS_PORT_PROGRESS").ok().as_deref() == Some("1");
 
     let mut stacked: Option<Array2<f32>> = None;
     let total = feature_cfg.frame_sizes.len() as f32;

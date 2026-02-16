@@ -88,7 +88,7 @@ pub fn run_inference(
     config: &CoreConfig,
     progress: &mut dyn ProgressSink,
 ) -> Result<ActivationOutput, RhythmError> {
-    let log_progress = std::env::var("RHYTHM_PROGRESS").ok().as_deref() == Some("1");
+    let log_progress = std::env::var("MADMOM_BEATS_PORT_PROGRESS").ok().as_deref() == Some("1");
     let model = load_model(&config.model.model_json, &config.model.weights_npz)?;
     run_inference_with_model(features, &model, log_progress, progress)
 }
@@ -99,7 +99,7 @@ pub fn run_inference_with_data(
     weights_npz: &[u8],
     progress: &mut dyn ProgressSink,
 ) -> Result<ActivationOutput, RhythmError> {
-    let log_progress = std::env::var("RHYTHM_PROGRESS").ok().as_deref() == Some("1");
+    let log_progress = std::env::var("MADMOM_BEATS_PORT_PROGRESS").ok().as_deref() == Some("1");
     let model = load_model_from_data(model_json, weights_npz)?;
     run_inference_with_model(features, &model, log_progress, progress)
 }

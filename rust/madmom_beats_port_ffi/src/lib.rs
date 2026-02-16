@@ -1,4 +1,4 @@
-use rhythm_core::{
+use madmom_beats_port_core::{
     analyze, analyze_with_progress, validate_core_config, CoreConfig, ProgressEvent, ProgressSink,
     RhythmError,
 };
@@ -109,7 +109,7 @@ fn set_last_error_from_failure(failure: FfiFailure) {
     set_last_error_details(failure.code, failure.message, failure.path, failure.context);
 }
 
-fn set_last_error_from_rhythm_error(err: &RhythmError) {
+fn set_last_error_from_core_error(err: &RhythmError) {
     let code = match err {
         RhythmError::InvalidInput(_) => FfiErrorCode::InvalidInput,
         RhythmError::Model(_) => FfiErrorCode::Model,
@@ -155,24 +155,24 @@ fn into_c_string_ptr(s: String) -> *mut c_char {
 }
 
 #[no_mangle]
-pub extern "C" fn rhythm_last_error_message() -> *mut c_char {
+pub extern "C" fn madmom_beats_port_last_error_message() -> *mut c_char {
     let state = get_last_error_snapshot();
     into_c_string_ptr(state.message)
 }
 
 #[no_mangle]
-pub extern "C" fn rhythm_last_error_code() -> c_uint {
+pub extern "C" fn madmom_beats_port_last_error_code() -> c_uint {
     let state = get_last_error_snapshot();
     state.code as c_uint
 }
 
 #[no_mangle]
-pub extern "C" fn rhythm_last_error_json() -> *mut c_char {
+pub extern "C" fn madmom_beats_port_last_error_json() -> *mut c_char {
     into_c_string_ptr(last_error_json_string())
 }
 
 #[no_mangle]
-pub extern "C" fn rhythm_default_config_json() -> *mut c_char {
+pub extern "C" fn madmom_beats_port_default_config_json() -> *mut c_char {
     match serde_json::to_string_pretty(&CoreConfig::default()) {
         Ok(json) => into_c_string_ptr(json),
         Err(err) => {
@@ -190,8 +190,10 @@ pub extern "C" fn rhythm_default_config_json() -> *mut c_char {
 /// - `config_json` must be null or a valid, null-terminated UTF-8 string.
 ///
 /// Returns NULL on success. On validation error, returns a newly allocated JSON
-/// payload and also updates rhythm_last_error_*.
-pub unsafe extern "C" fn rhythm_validate_config_json(config_json: *const c_char) -> *mut c_char {
+/// payload and also updates madmom_beats_port_last_error_*.
+pub unsafe extern "C" fn madmom_beats_port_validate_config_json(
+    config_json: *const c_char,
+) -> *mut c_char {
     match parse_config(config_json) {
         Ok(_) => {
             clear_last_error();
@@ -208,7 +210,7 @@ pub unsafe extern "C" fn rhythm_validate_config_json(config_json: *const c_char)
 /// # Safety
 /// The pointer must be either null or previously returned by this library and
 /// not already freed.
-pub unsafe extern "C" fn rhythm_free_string(s: *mut c_char) {
+pub unsafe extern "C" fn madmom_beats_port_free_string(s: *mut c_char) {
     if s.is_null() {
         return;
     }
@@ -219,7 +221,7 @@ pub unsafe extern "C" fn rhythm_free_string(s: *mut c_char) {
 /// # Safety
 /// - `samples_ptr` must be valid for reads of `samples_len` floats.
 /// - `config_json` must be null or a valid, null-terminated UTF-8 string.
-pub unsafe extern "C" fn rhythm_analyze_json(
+pub unsafe extern "C" fn madmom_beats_port_analyze_json(
     samples_ptr: *const c_float,
     samples_len: usize,
     sample_rate: c_uint,
@@ -256,7 +258,7 @@ pub unsafe extern "C" fn rhythm_analyze_json(
             }
         },
         Err(err) => {
-            set_last_error_from_rhythm_error(&err);
+            set_last_error_from_core_error(&err);
             std::ptr::null_mut()
         }
     }
@@ -282,7 +284,7 @@ impl ProgressSink for FfiProgress {
 /// - `samples_ptr` must be valid for reads of `samples_len` floats.
 /// - `config_json` must be null or a valid, null-terminated UTF-8 string.
 /// - `progress_cb` must be safe to call from this thread if provided.
-pub unsafe extern "C" fn rhythm_analyze_json_with_progress(
+pub unsafe extern "C" fn madmom_beats_port_analyze_json_with_progress(
     samples_ptr: *const c_float,
     samples_len: usize,
     sample_rate: c_uint,
@@ -325,7 +327,7 @@ pub unsafe extern "C" fn rhythm_analyze_json_with_progress(
             }
         },
         Err(err) => {
-            set_last_error_from_rhythm_error(&err);
+            set_last_error_from_core_error(&err);
             std::ptr::null_mut()
         }
     }

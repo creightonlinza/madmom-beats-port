@@ -3,7 +3,7 @@ rustflags = [
   "-C",
   "link-arg=-Wl,-z,max-page-size=16384",
   "-C",
-  "link-arg=-Wl,-soname,librhythm_ffi.so",
+  "link-arg=-Wl,-soname,libmadmom_beats_port_ffi.so",
 ]
 
 [target.armv7-linux-androideabi]
@@ -11,7 +11,7 @@ rustflags = [
   "-C",
   "link-arg=-Wl,-z,max-page-size=16384",
   "-C",
-  "link-arg=-Wl,-soname,librhythm_ffi.so",
+  "link-arg=-Wl,-soname,libmadmom_beats_port_ffi.so",
 ]
 
 [target.x86_64-linux-android]
@@ -19,5 +19,5 @@ rustflags = [
   "-C",
   "link-arg=-Wl,-z,max-page-size=16384",
   "-C",
-  "link-arg=-Wl,-soname,librhythm_ffi.so",
+  "link-arg=-Wl,-soname,libmadmom_beats_port_ffi.so",
 ]
