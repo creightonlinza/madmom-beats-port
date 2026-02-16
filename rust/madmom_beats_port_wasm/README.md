@@ -1,6 +1,6 @@
-# rhythm_wasm
+# madmom_beats_port_wasm
 
-WASM wrapper around `rhythm_core` (built with `wasm-pack --target web`).
+WASM wrapper around `madmom_beats_port_core` (built with `wasm-pack --target web`).
 
 ## Exported functions
 
@@ -59,7 +59,7 @@ import init, {
   analyze_json_with_model_progress,
   default_config_json,
   validate_config_json,
-} from "./rhythm_wasm.js";
+} from "./madmom_beats_port_wasm.js";
 
 await init();
 const modelJson = await (await fetch("./models/downbeats_blstm.json")).text();

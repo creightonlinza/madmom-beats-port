@@ -1,5 +1,5 @@
 [package]
-name = "rhythm_ffi"
+name = "madmom_beats_port_ffi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-rhythm_core = { path = "../rhythm_core" }
+madmom_beats_port_core = { path = "../madmom_beats_port_core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

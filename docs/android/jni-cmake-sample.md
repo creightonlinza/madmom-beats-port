@@ -1,14 +1,14 @@
-# Android JNI + CMake Sample (v3.0.0)
+# Android JNI + CMake Sample (v4.0.0)
 
-This is a minimal integration sketch for `rhythm_ffi` in an Android app.
+This is a minimal integration sketch for `madmom_beats_port_ffi` in an Android app.
 
 ## 1) Package native libraries
 
 Place ABI folders under your app:
 
-- `src/main/jniLibs/arm64-v8a/librhythm_ffi.so`
-- `src/main/jniLibs/armeabi-v7a/librhythm_ffi.so`
-- `src/main/jniLibs/x86_64/librhythm_ffi.so`
+- `src/main/jniLibs/arm64-v8a/libmadmom_beats_port_ffi.so`
+- `src/main/jniLibs/armeabi-v7a/libmadmom_beats_port_ffi.so`
+- `src/main/jniLibs/x86_64/libmadmom_beats_port_ffi.so`
 
 Also ship:
 
@@ -21,15 +21,15 @@ Copy model files to app-private storage before analysis.
 
 ```cmake
 cmake_minimum_required(VERSION 3.22.1)
-project(rhythm_bridge C)
+project(madmom_beats_port_bridge C)
 
-add_library(rhythm_ffi SHARED IMPORTED)
-set_target_properties(rhythm_ffi PROPERTIES
-  IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/librhythm_ffi.so")
+add_library(madmom_beats_port_ffi SHARED IMPORTED)
+set_target_properties(madmom_beats_port_ffi PROPERTIES
+  IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libmadmom_beats_port_ffi.so")
 
-add_library(rhythm_bridge SHARED rhythm_bridge.c)
-target_include_directories(rhythm_bridge PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(rhythm_bridge rhythm_ffi log)
+add_library(madmom_beats_port_bridge SHARED madmom_beats_port_bridge.c)
+target_include_directories(madmom_beats_port_bridge PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(madmom_beats_port_bridge madmom_beats_port_ffi log)
 ```
 
 ## 3) JNI bridge
@@ -37,10 +37,10 @@ target_link_libraries(rhythm_bridge rhythm_ffi log)
 ```c
 #include <jni.h>
 #include <stdint.h>
-#include "rhythm.h"
+#include "madmom_beats_port.h"
 
 JNIEXPORT jstring JNICALL
-Java_com_example_rhythm_RhythmBridge_analyze(JNIEnv* env, jclass,
+Java_com_example_madmom_beats_port_RhythmBridge_analyze(JNIEnv* env, jclass,
                                              jfloatArray samples,
                                              jint sample_rate,
                                              jstring config_json) {
@@ -48,28 +48,28 @@ Java_com_example_rhythm_RhythmBridge_analyze(JNIEnv* env, jclass,
   jfloat* data = (*env)->GetFloatArrayElements(env, samples, NULL);
   const char* cfg = config_json ? (*env)->GetStringUTFChars(env, config_json, NULL) : NULL;
 
-  char* validation = rhythm_validate_config_json(cfg);
+  char* validation = madmom_beats_port_validate_config_json(cfg);
   if (validation != NULL) {
     jstring out = (*env)->NewStringUTF(env, validation);
-    rhythm_free_string(validation);
+    madmom_beats_port_free_string(validation);
     if (config_json) (*env)->ReleaseStringUTFChars(env, config_json, cfg);
     (*env)->ReleaseFloatArrayElements(env, samples, data, JNI_ABORT);
     return out;
   }
 
-  char* out_json = rhythm_analyze_json(data, (size_t)len, (uint32_t)sample_rate, cfg);
+  char* out_json = madmom_beats_port_analyze_json(data, (size_t)len, (uint32_t)sample_rate, cfg);
   if (config_json) (*env)->ReleaseStringUTFChars(env, config_json, cfg);
   (*env)->ReleaseFloatArrayElements(env, samples, data, JNI_ABORT);
 
   if (out_json == NULL) {
-    char* err = rhythm_last_error_json();
+    char* err = madmom_beats_port_last_error_json();
     jstring out = (*env)->NewStringUTF(env, err ? err : "{\"code\":10,\"message\":\"unknown\"}");
-    rhythm_free_string(err);
+    madmom_beats_port_free_string(err);
     return out;
   }
 
   jstring out = (*env)->NewStringUTF(env, out_json);
-  rhythm_free_string(out_json);
+  madmom_beats_port_free_string(out_json);
   return out;
 }
 ```
@@ -79,7 +79,7 @@ Java_com_example_rhythm_RhythmBridge_analyze(JNIEnv* env, jclass,
 ```kotlin
 object RhythmBridge {
   init {
-    System.loadLibrary("rhythm_bridge")
+    System.loadLibrary("madmom_beats_port_bridge")
   }
 
   external fun analyze(samples: FloatArray, sampleRate: Int, configJson: String?): String

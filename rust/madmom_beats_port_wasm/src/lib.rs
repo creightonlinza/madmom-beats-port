@@ -1,5 +1,5 @@
 use js_sys::Function;
-use rhythm_core::{
+use madmom_beats_port_core::{
     analyze, analyze_with_model_data, analyze_with_progress_and_model_data, validate_core_config,
     CoreConfig, ProgressEvent, ProgressSink,
 };

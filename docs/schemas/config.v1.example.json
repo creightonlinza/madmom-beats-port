@@ -18,8 +18,8 @@
     "positive_diffs": true
   },
   "model": {
-    "model_json": "/data/user/0/<app>/files/rhythm_models/downbeats_blstm.json",
-    "weights_npz": "/data/user/0/<app>/files/rhythm_models/downbeats_blstm_weights.npz"
+    "model_json": "/data/user/0/<app>/files/madmom_beats_port_models/downbeats_blstm.json",
+    "weights_npz": "/data/user/0/<app>/files/madmom_beats_port_models/downbeats_blstm_weights.npz"
   },
   "dbn": {
     "beats_per_bar": [
