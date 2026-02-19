@@ -79,9 +79,19 @@ pub fn analyze_with_progress(
         None => &mut noop,
     };
 
-    let features = features::compute_features(samples, config, sink)?;
-    let activations = model::run_inference(&features, config, sink)?;
-    let beats = dbn::decode(&activations, config, sink)?;
+    emit_stage_telemetry("features:start");
+    let features = features::compute_features(samples, config, sink)
+        .map_err(|e| with_stage_error("features", e))?;
+    emit_stage_telemetry("features:end");
+
+    emit_stage_telemetry("inference:start");
+    let activations = model::run_inference(&features, config, sink)
+        .map_err(|e| with_stage_error("inference", e))?;
+    emit_stage_telemetry("inference:end");
+
+    emit_stage_telemetry("dbn:start");
+    let beats = dbn::decode(&activations, config, sink).map_err(|e| with_stage_error("dbn", e))?;
+    emit_stage_telemetry("dbn:end");
     build_analysis_output(beats, config.feature.fps)
 }
 
@@ -110,9 +120,19 @@ pub fn analyze_with_progress_and_model_data(
         None => &mut noop,
     };
 
-    let features = features::compute_features(samples, config, sink)?;
-    let activations = model::run_inference_with_data(&features, model_json, weights_npz, sink)?;
-    let beats = dbn::decode(&activations, config, sink)?;
+    emit_stage_telemetry("features:start");
+    let features = features::compute_features(samples, config, sink)
+        .map_err(|e| with_stage_error("features", e))?;
+    emit_stage_telemetry("features:end");
+
+    emit_stage_telemetry("inference:start");
+    let activations = model::run_inference_with_data(&features, model_json, weights_npz, sink)
+        .map_err(|e| with_stage_error("inference", e))?;
+    emit_stage_telemetry("inference:end");
+
+    emit_stage_telemetry("dbn:start");
+    let beats = dbn::decode(&activations, config, sink).map_err(|e| with_stage_error("dbn", e))?;
+    emit_stage_telemetry("dbn:end");
     build_analysis_output(beats, config.feature.fps)
 }
 
@@ -161,4 +181,56 @@ struct NoopProgressSink;
 
 impl ProgressSink for NoopProgressSink {
     fn on_progress(&mut self, _event: ProgressEvent) {}
+}
+
+fn with_stage_error(stage: &str, err: RhythmError) -> RhythmError {
+    let (pages, bytes) = wasm_memory_usage();
+    let prefix = format!(
+        "{} failed (wasm_pages={}, wasm_bytes={}): ",
+        stage, pages, bytes
+    );
+    match err {
+        RhythmError::InvalidInput(message) => {
+            RhythmError::InvalidInput(format!("{}{}", prefix, message))
+        }
+        RhythmError::Model(message) => RhythmError::Model(format!("{}{}", prefix, message)),
+        RhythmError::NotImplemented(message) => {
+            RhythmError::NotImplemented(format!("{}{}", prefix, message))
+        }
+        RhythmError::Io(message) => RhythmError::Io(format!("{}{}", prefix, message)),
+    }
+}
+
+fn emit_stage_telemetry(stage: &str) {
+    if !telemetry_enabled() {
+        return;
+    }
+    let (pages, bytes) = wasm_memory_usage();
+    eprintln!(
+        "madmom_beats_port telemetry stage={} wasm_pages={} wasm_bytes={}",
+        stage, pages, bytes
+    );
+}
+
+fn telemetry_enabled() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        true
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var("MADMOM_BEATS_PORT_TELEMETRY").ok().as_deref() == Some("1")
+    }
+}
+
+fn wasm_memory_usage() -> (usize, usize) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let pages = core::arch::wasm32::memory_size(0);
+        return (pages, pages.saturating_mul(65_536));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        (0, 0)
+    }
 }

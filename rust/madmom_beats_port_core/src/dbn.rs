@@ -1,5 +1,10 @@
 use crate::types::{ActivationOutput, BeatEvent, ProgressEvent, ProgressSink, ProgressStage};
 use crate::{CoreConfig, RhythmError};
+use std::mem::size_of;
+
+const VITERBI_BLOCK_FRAMES: usize = 256;
+const DBN_PROGRESS_MIN_DELTA: f32 = 0.02;
+const DBN_PROGRESS_WORK_PORTION: f32 = 0.98;
 
 pub fn decode(
     activations: &ActivationOutput,
@@ -35,12 +40,18 @@ pub fn decode(
     }
 
     let hmms = build_hmms(config)?;
+    let mut total_work = 0usize;
+    for hmm in &hmms {
+        total_work = total_work.saturating_add(hmm.work_units(act.len()));
+    }
+    let mut progress_tracker = DbnProgressTracker::new(progress, total_work.max(1));
+
     let mut best_logp = f64::NEG_INFINITY;
     let mut best_path: Vec<usize> = Vec::new();
     let mut best_hmm: Option<&HiddenMarkovModel> = None;
 
     for hmm in &hmms {
-        let (path, logp) = hmm.viterbi(&act);
+        let (path, logp) = hmm.viterbi(&act, &mut progress_tracker)?;
         if logp > best_logp {
             best_logp = logp;
             best_path = path;
@@ -92,6 +103,7 @@ pub fn decode(
             confidence: confidences[event_idx],
         });
     }
+    progress_tracker.finish();
 
     progress.on_progress(ProgressEvent {
         stage: ProgressStage::Dbn,
@@ -495,57 +507,184 @@ impl HiddenMarkovModel {
         }
     }
 
-    fn viterbi(&self, observations: &[[f32; 2]]) -> (Vec<usize>, f64) {
+    fn work_units(&self, num_frames: usize) -> usize {
+        let num_states = self.transition_model.pointers.len().saturating_sub(1);
+        num_frames.saturating_mul(num_states).saturating_mul(2)
+    }
+
+    fn viterbi(
+        &self,
+        observations: &[[f32; 2]],
+        progress: &mut DbnProgressTracker<'_>,
+    ) -> Result<(Vec<usize>, f64), RhythmError> {
         let num_states = self.transition_model.pointers.len() - 1;
         let num_frames = observations.len();
+        if num_frames == 0 {
+            return Ok((Vec::new(), f64::NEG_INFINITY));
+        }
         let log_densities = self.observation_model.log_densities(observations);
 
-        let mut current = vec![f64::NEG_INFINITY; num_states];
         let mut previous: Vec<f64> = self.initial_distribution.iter().map(|v| v.ln()).collect();
-        let mut bt = vec![0usize; num_states * num_frames];
+        let mut current = vec![f64::NEG_INFINITY; num_states];
 
-        for (frame, dens) in log_densities.iter().enumerate() {
-            for state in 0..num_states {
-                let density = dens[self.observation_model.pointers[state]];
-                let mut best = f64::NEG_INFINITY;
-                let mut best_prev = 0usize;
-                let start = self.transition_model.pointers[state];
-                let end = self.transition_model.pointers[state + 1];
-                for idx in start..end {
-                    let prev_state = self.transition_model.states[idx];
-                    let trans = self.transition_model.log_probabilities[idx];
-                    let score = previous[prev_state] + trans + density;
-                    if score > best {
-                        best = score;
-                        best_prev = prev_state;
-                    }
-                }
-                current[state] = best;
-                bt[frame * num_states + state] = best_prev;
+        let num_blocks = num_frames.div_ceil(VITERBI_BLOCK_FRAMES);
+        let mut boundary_scores = Vec::with_capacity(num_blocks);
+        for block_idx in 0..num_blocks {
+            boundary_scores.push(previous.clone());
+            let start = block_idx * VITERBI_BLOCK_FRAMES;
+            let end = (start + VITERBI_BLOCK_FRAMES).min(num_frames);
+            for dens in &log_densities[start..end] {
+                self.run_viterbi_frame(&previous, &mut current, dens, None);
+                previous.clone_from_slice(&current);
             }
-            previous.clone_from_slice(&current);
+            progress.advance((end - start).saturating_mul(num_states));
         }
 
         let mut best_state = 0usize;
         let mut best_log = f64::NEG_INFINITY;
-        for (i, v) in current.iter().enumerate() {
+        for (i, v) in previous.iter().enumerate() {
             if *v > best_log {
                 best_log = *v;
                 best_state = i;
             }
         }
         if best_log.is_infinite() && best_log.is_sign_negative() {
-            return (Vec::new(), best_log);
+            // Keep global progress consistent with expected per-HMM work.
+            progress.advance(num_frames.saturating_mul(num_states));
+            return Ok((Vec::new(), best_log));
         }
 
         let mut path = vec![0usize; num_frames];
-        let mut state = best_state;
-        for frame in (0..num_frames).rev() {
-            path[frame] = state;
-            state = bt[frame * num_states + state];
+        let mut end_state = best_state;
+
+        for block_idx in (0..num_blocks).rev() {
+            let start = block_idx * VITERBI_BLOCK_FRAMES;
+            let end = (start + VITERBI_BLOCK_FRAMES).min(num_frames);
+            let block_len = end - start;
+            let mut local_prev = boundary_scores[block_idx].clone();
+            let mut local_curr = vec![f64::NEG_INFINITY; num_states];
+            let mut bt = allocate_backpointers(num_states, block_len)?;
+
+            for (local_frame, dens) in log_densities[start..end].iter().enumerate() {
+                let row_start = local_frame * num_states;
+                let row_end = row_start + num_states;
+                self.run_viterbi_frame(
+                    &local_prev,
+                    &mut local_curr,
+                    dens,
+                    Some(&mut bt[row_start..row_end]),
+                );
+                local_prev.clone_from_slice(&local_curr);
+            }
+            progress.advance(block_len.saturating_mul(num_states));
+
+            let mut state = end_state;
+            for local_frame in (0..block_len).rev() {
+                path[start + local_frame] = state;
+                state = bt[local_frame * num_states + state] as usize;
+            }
+            end_state = state;
         }
-        (path, best_log)
+        Ok((path, best_log))
     }
+
+    fn run_viterbi_frame(
+        &self,
+        previous: &[f64],
+        current: &mut [f64],
+        dens: &[f64; 3],
+        mut backpointers: Option<&mut [u32]>,
+    ) {
+        for state in 0..current.len() {
+            let density = dens[self.observation_model.pointers[state]];
+            let mut best = f64::NEG_INFINITY;
+            let mut best_prev = 0usize;
+            let start = self.transition_model.pointers[state];
+            let end = self.transition_model.pointers[state + 1];
+            for idx in start..end {
+                let prev_state = self.transition_model.states[idx];
+                let trans = self.transition_model.log_probabilities[idx];
+                let score = previous[prev_state] + trans + density;
+                if score > best {
+                    best = score;
+                    best_prev = prev_state;
+                }
+            }
+            current[state] = best;
+            if let Some(bt_row) = backpointers.as_deref_mut() {
+                bt_row[state] = best_prev as u32;
+            }
+        }
+    }
+}
+
+struct DbnProgressTracker<'a> {
+    sink: &'a mut dyn ProgressSink,
+    total_work: f64,
+    completed_work: f64,
+    last_progress: f32,
+}
+
+impl<'a> DbnProgressTracker<'a> {
+    fn new(sink: &'a mut dyn ProgressSink, total_work: usize) -> Self {
+        Self {
+            sink,
+            total_work: total_work as f64,
+            completed_work: 0.0,
+            last_progress: 0.0,
+        }
+    }
+
+    fn advance(&mut self, units: usize) {
+        if units == 0 {
+            return;
+        }
+        self.completed_work = (self.completed_work + units as f64).min(self.total_work);
+        self.maybe_emit(false);
+    }
+
+    fn finish(&mut self) {
+        self.completed_work = self.total_work;
+        self.maybe_emit(true);
+    }
+
+    fn maybe_emit(&mut self, force: bool) {
+        if self.total_work <= 0.0 {
+            return;
+        }
+        let work_ratio = (self.completed_work / self.total_work).clamp(0.0, 1.0);
+        let progress = (work_ratio as f32 * DBN_PROGRESS_WORK_PORTION).clamp(0.0, 1.0);
+        let progressed_enough = (progress - self.last_progress) >= DBN_PROGRESS_MIN_DELTA;
+        if force || progressed_enough {
+            self.sink.on_progress(ProgressEvent {
+                stage: ProgressStage::Dbn,
+                progress,
+            });
+            self.last_progress = progress;
+        }
+    }
+}
+
+fn allocate_backpointers(num_states: usize, num_frames: usize) -> Result<Vec<u32>, RhythmError> {
+    if num_states > u32::MAX as usize {
+        return Err(RhythmError::Model(format!(
+            "decode state count {} exceeds u32 backpointer capacity",
+            num_states
+        )));
+    }
+    let entries = num_states.checked_mul(num_frames).ok_or_else(|| {
+        RhythmError::Model("decode backpointer allocation size overflowed".to_string())
+    })?;
+    let mut bt = Vec::<u32>::new();
+    if bt.try_reserve_exact(entries).is_err() {
+        let bytes = entries.saturating_mul(size_of::<u32>());
+        return Err(RhythmError::Model(format!(
+            "decode backpointer allocation exceeded memory (states={}, block_frames={}, entries={}, bytes={})",
+            num_states, num_frames, entries, bytes
+        )));
+    }
+    bt.resize(entries, 0u32);
+    Ok(bt)
 }
 
 fn exponential_transition(
@@ -651,4 +790,63 @@ fn logspace_intervals(min_interval: f32, max_interval: f32, count: usize) -> Vec
         out.push(v.round() as usize);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode;
+    use crate::types::{ActivationOutput, ProgressEvent, ProgressSink, ProgressStage};
+    use crate::CoreConfig;
+
+    struct Recorder {
+        events: Vec<ProgressEvent>,
+    }
+
+    impl ProgressSink for Recorder {
+        fn on_progress(&mut self, event: ProgressEvent) {
+            self.events.push(event);
+        }
+    }
+
+    #[test]
+    fn decode_emits_intermediate_dbn_progress() {
+        let mut beat = vec![0.01f32; 800];
+        let mut downbeat = vec![0.005f32; 800];
+        for i in (0..800).step_by(50) {
+            beat[i] = 0.35;
+            if i % 200 == 0 {
+                downbeat[i] = 0.25;
+            }
+        }
+        let activations = ActivationOutput { beat, downbeat };
+        let config = CoreConfig::default();
+        let mut sink = Recorder { events: Vec::new() };
+
+        let _beats = decode(&activations, &config, &mut sink).expect("decode should succeed");
+        let dbn_events: Vec<ProgressEvent> = sink
+            .events
+            .iter()
+            .copied()
+            .filter(|event| event.stage == ProgressStage::Dbn)
+            .collect();
+
+        assert!(
+            dbn_events.len() > 2,
+            "expected DBN progress with intermediate ticks"
+        );
+        assert!(
+            (dbn_events.first().unwrap().progress - 0.0).abs() < f32::EPSILON,
+            "first DBN progress should be 0.0"
+        );
+        assert!(
+            (dbn_events.last().unwrap().progress - 1.0).abs() < f32::EPSILON,
+            "final DBN progress should be 1.0"
+        );
+        for pair in dbn_events.windows(2) {
+            assert!(
+                pair[1].progress >= pair[0].progress,
+                "DBN progress should be monotonic"
+            );
+        }
+    }
 }
