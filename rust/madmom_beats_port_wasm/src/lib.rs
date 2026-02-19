@@ -124,3 +124,37 @@ pub fn analyze_json_with_model_progress(
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
     to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use madmom_beats_port_core::{analyze_with_model_data, CoreConfig};
+
+    const MODEL_JSON: &str = include_str!("../../../models/downbeats_blstm.json");
+    const MODEL_WEIGHTS: &[u8] = include_bytes!("../../../models/downbeats_blstm_weights.npz");
+
+    #[test]
+    #[ignore = "long-running stability test"]
+    fn long_synthetic_track_does_not_trap() {
+        let sample_rate = 44_100u32;
+        let duration_sec = 11 * 60;
+        let total_samples = sample_rate as usize * duration_sec;
+
+        let mut samples = vec![0.0f32; total_samples];
+        let beat_period = (sample_rate as usize * 60) / 120;
+        for idx in (0..total_samples).step_by(beat_period.max(1)) {
+            for tap in 0..256usize {
+                let pos = idx + tap;
+                if pos >= total_samples {
+                    break;
+                }
+                samples[pos] += (1.0 - tap as f32 / 256.0) * 0.5;
+            }
+        }
+
+        let config = CoreConfig::default();
+        let result =
+            analyze_with_model_data(&samples, sample_rate, &config, MODEL_JSON, MODEL_WEIGHTS);
+
+        assert!(result.is_ok(), "long synthetic model-data analysis failed");
+    }
+}

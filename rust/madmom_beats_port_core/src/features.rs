@@ -1,5 +1,5 @@
 use crate::{CoreConfig, ProgressEvent, ProgressSink, ProgressStage, RhythmError};
-use ndarray::{s, Array2, Axis};
+use ndarray::{Array2, Axis};
 use rustfft::num_complex::Complex32;
 use rustfft::FftPlanner;
 
@@ -7,6 +7,15 @@ use rustfft::FftPlanner;
 pub struct Features {
     /// Shape: frames x feature_dim
     pub data: Array2<f32>,
+}
+
+struct ResolutionPlan {
+    frame_size: usize,
+    window: Vec<f32>,
+    filterbank: Array2<f32>,
+    num_filters: usize,
+    diff_frames: usize,
+    column_offset: usize,
 }
 
 pub fn compute_features(
@@ -20,95 +29,189 @@ pub fn compute_features(
     }
     let log_progress = std::env::var("MADMOM_BEATS_PORT_PROGRESS").ok().as_deref() == Some("1");
 
-    let mut stacked: Option<Array2<f32>> = None;
-    let total = feature_cfg.frame_sizes.len() as f32;
-    for (idx, (frame_size, num_bands)) in feature_cfg
+    let num_frames = frame_count(samples.len(), feature_cfg.fps, feature_cfg.sample_rate)?;
+    let mut plans = Vec::with_capacity(feature_cfg.frame_sizes.len());
+    let mut total_cols = 0usize;
+
+    for (&frame_size, &num_bands) in feature_cfg
         .frame_sizes
         .iter()
         .zip(feature_cfg.num_bands.iter())
-        .enumerate()
     {
-        let frames = frame_signal(
-            samples,
-            *frame_size,
-            feature_cfg.fps,
-            feature_cfg.sample_rate,
-        )?;
-        if log_progress {
-            println!(
-                "features: frame_size {} -> {} frames",
-                frame_size,
-                frames.len_of(Axis(0))
-            );
-        }
-        let stft = stft(&frames)?;
-        let spec = magnitude_spectrogram(&stft);
-        let filtered = filtered_spectrogram(
-            &spec,
-            feature_cfg.sample_rate,
-            *frame_size,
-            *num_bands,
+        let num_bins = frame_size / 2;
+        let bin_freqs = bin_frequencies(feature_cfg.sample_rate, frame_size, num_bins);
+        let filterbank = build_log_filterbank(
+            &bin_freqs,
+            num_bands,
             feature_cfg.fmin,
             feature_cfg.fmax,
+            true,
+            true,
         )?;
-        let log_spec = log_spectrogram(&filtered, 1.0, 1.0);
-        let diff = diff_spectrogram(
-            &log_spec,
+        let num_filters = filterbank.len_of(Axis(1));
+        let window = hann_window(frame_size);
+        let diff_frames = diff_frames_from_window(
+            &window,
             feature_cfg.diff_ratio,
-            *frame_size,
             feature_cfg.fps,
             feature_cfg.sample_rate,
         );
-        let stacked_local = hstack(&log_spec, &diff)?;
-
-        stacked = Some(match stacked {
-            None => stacked_local,
-            Some(prev) => hstack(&prev, &stacked_local)?,
+        plans.push(ResolutionPlan {
+            frame_size,
+            window,
+            filterbank,
+            num_filters,
+            diff_frames,
+            column_offset: total_cols,
         });
+        total_cols += num_filters * 2;
+    }
 
-        let pct = (idx as f32 + 1.0) / total;
+    let mut output = Array2::<f32>::zeros((num_frames, total_cols));
+    let total = plans.len() as f32;
+    for (idx, plan) in plans.iter().enumerate() {
+        if log_progress {
+            println!(
+                "features: frame_size {} -> {} frames, {} filters",
+                plan.frame_size, num_frames, plan.num_filters
+            );
+        }
+        fill_resolution_features(
+            samples,
+            feature_cfg.fps,
+            feature_cfg.sample_rate,
+            num_frames,
+            plan,
+            &mut output,
+        )?;
         progress.on_progress(ProgressEvent {
             stage: ProgressStage::Features,
-            progress: pct,
+            progress: (idx as f32 + 1.0) / total,
         });
     }
 
-    let data = stacked.ok_or_else(|| RhythmError::InvalidInput("no features".to_string()))?;
-    Ok(Features { data })
+    Ok(Features { data: output })
 }
 
-fn frame_signal(
+fn fill_resolution_features(
     samples: &[f32],
-    frame_size: usize,
     fps: f32,
     sample_rate: u32,
-) -> Result<Array2<f32>, RhythmError> {
-    if frame_size == 0 {
-        return Err(RhythmError::InvalidInput("frame_size = 0".to_string()));
+    num_frames: usize,
+    plan: &ResolutionPlan,
+    output: &mut Array2<f32>,
+) -> Result<(), RhythmError> {
+    let hop_size = sample_rate as f32 / fps;
+    let frame_size = plan.frame_size;
+    let num_bins = frame_size / 2;
+    let num_filters = plan.num_filters;
+
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(frame_size);
+
+    let mut fft_buffer = vec![Complex32::new(0.0, 0.0); frame_size];
+    let mut magnitude = vec![0.0f32; num_bins];
+    let mut log_row = vec![0.0f32; num_filters];
+    let mut diff_row = vec![0.0f32; num_filters];
+
+    let history_rows = plan.diff_frames.max(1);
+    let mut history = vec![0.0f32; history_rows * num_filters];
+
+    for frame_idx in 0..num_frames {
+        write_windowed_frame(
+            samples,
+            frame_idx,
+            hop_size,
+            frame_size,
+            &plan.window,
+            &mut fft_buffer,
+        );
+
+        fft.process(&mut fft_buffer);
+        for bin in 0..num_bins {
+            magnitude[bin] = fft_buffer[bin].norm();
+        }
+
+        for (band, log_value) in log_row.iter_mut().enumerate().take(num_filters) {
+            let mut sum = 0.0f32;
+            for (bin, magnitude_value) in magnitude.iter().enumerate().take(num_bins) {
+                sum += *magnitude_value * plan.filterbank[(bin, band)];
+            }
+            *log_value = (sum + 1.0).log10();
+        }
+
+        diff_row.fill(0.0);
+        if frame_idx >= plan.diff_frames {
+            let prev_slot = (frame_idx - plan.diff_frames) % history_rows;
+            let prev_offset = prev_slot * num_filters;
+            for (band, diff_value) in diff_row.iter_mut().enumerate().take(num_filters) {
+                let delta = log_row[band] - history[prev_offset + band];
+                *diff_value = if delta > 0.0 { delta } else { 0.0 };
+            }
+        }
+
+        let slot = frame_idx % history_rows;
+        let slot_offset = slot * num_filters;
+        history[slot_offset..slot_offset + num_filters].copy_from_slice(&log_row);
+
+        let log_start = plan.column_offset;
+        let diff_start = log_start + num_filters;
+        for (band, (&log_value, &diff_value)) in log_row
+            .iter()
+            .zip(diff_row.iter())
+            .enumerate()
+            .take(num_filters)
+        {
+            output[(frame_idx, log_start + band)] = log_value;
+            output[(frame_idx, diff_start + band)] = diff_value;
+        }
     }
+
+    Ok(())
+}
+
+fn frame_count(sample_count: usize, fps: f32, sample_rate: u32) -> Result<usize, RhythmError> {
     if fps <= 0.0 {
         return Err(RhythmError::InvalidInput("fps must be > 0".to_string()));
     }
-
     let hop_size = sample_rate as f32 / fps;
-    let num_frames = ((samples.len() as f32) / hop_size).ceil() as usize;
-    let mut frames = Array2::<f32>::zeros((num_frames, frame_size));
-    let half = frame_size / 2;
+    Ok(((sample_count as f32) / hop_size).ceil() as usize)
+}
 
-    for i in 0..num_frames {
-        let ref_sample = (i as f32 * hop_size).floor() as isize;
-        let start = ref_sample - half as isize;
-        for j in 0..frame_size {
-            let idx = start + j as isize;
-            let val = if idx < 0 || idx >= samples.len() as isize {
-                0.0
-            } else {
-                samples[idx as usize]
-            };
-            frames[(i, j)] = val;
+fn write_windowed_frame(
+    samples: &[f32],
+    frame_idx: usize,
+    hop_size: f32,
+    frame_size: usize,
+    window: &[f32],
+    out: &mut [Complex32],
+) {
+    let ref_sample = (frame_idx as f32 * hop_size).floor() as isize;
+    let start = ref_sample - (frame_size / 2) as isize;
+    for i in 0..frame_size {
+        let sample_idx = start + i as isize;
+        let sample = if sample_idx < 0 || sample_idx >= samples.len() as isize {
+            0.0
+        } else {
+            samples[sample_idx as usize]
+        };
+        out[i] = Complex32::new(sample * window[i], 0.0);
+    }
+}
+
+fn diff_frames_from_window(window: &[f32], diff_ratio: f32, fps: f32, sample_rate: u32) -> usize {
+    let hop_size = (sample_rate as f32) / fps;
+    let max_val = window.iter().copied().fold(f32::MIN, f32::max);
+    let threshold = diff_ratio * max_val;
+    let mut sample = 0usize;
+    for (i, v) in window.iter().enumerate() {
+        if *v > threshold {
+            sample = i;
+            break;
         }
     }
-    Ok(frames)
+    let diff_samples = (window.len() as f32) / 2.0 - sample as f32;
+    (diff_samples / hop_size).round().max(1.0) as usize
 }
 
 fn hann_window(frame_size: usize) -> Vec<f32> {
@@ -122,40 +225,6 @@ fn hann_window(frame_size: usize) -> Vec<f32> {
             0.5 - 0.5 * (2.0 * std::f32::consts::PI * x / (n - 1.0)).cos()
         })
         .collect()
-}
-
-fn stft(frames: &Array2<f32>) -> Result<Array2<Complex32>, RhythmError> {
-    let num_frames = frames.len_of(Axis(0));
-    let frame_size = frames.len_of(Axis(1));
-    let num_bins = frame_size / 2;
-
-    let window = hann_window(frame_size);
-
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(frame_size);
-
-    let mut output = Array2::<Complex32>::zeros((num_frames, num_bins));
-    let mut buffer = vec![Complex32::new(0.0, 0.0); frame_size];
-
-    for i in 0..num_frames {
-        for j in 0..frame_size {
-            let val = frames[(i, j)] * window[j];
-            buffer[j] = Complex32::new(val, 0.0);
-        }
-        fft.process(&mut buffer);
-        for k in 0..num_bins {
-            output[(i, k)] = buffer[k];
-        }
-    }
-    Ok(output)
-}
-
-fn magnitude_spectrogram(stft: &Array2<Complex32>) -> Array2<f32> {
-    let mut out = Array2::<f32>::zeros(stft.raw_dim());
-    for ((i, j), val) in stft.indexed_iter() {
-        out[(i, j)] = val.norm();
-    }
-    out
 }
 
 fn bin_frequencies(sample_rate: u32, fft_size: usize, num_bins: usize) -> Vec<f32> {
@@ -289,77 +358,4 @@ fn build_log_filterbank(
         }
     }
     Ok(fb)
-}
-
-fn filtered_spectrogram(
-    spec: &Array2<f32>,
-    sample_rate: u32,
-    fft_size: usize,
-    num_bands: usize,
-    fmin: f32,
-    fmax: f32,
-) -> Result<Array2<f32>, RhythmError> {
-    let num_bins = spec.len_of(Axis(1));
-    let bin_freqs = bin_frequencies(sample_rate, fft_size, num_bins);
-    let fb = build_log_filterbank(&bin_freqs, num_bands, fmin, fmax, true, true)?;
-    Ok(spec.dot(&fb))
-}
-
-fn log_spectrogram(spec: &Array2<f32>, mul: f32, add: f32) -> Array2<f32> {
-    let mut out = spec.clone();
-    if mul != 1.0 {
-        out.mapv_inplace(|v| v * mul);
-    }
-    if add != 0.0 {
-        out.mapv_inplace(|v| v + add);
-    }
-    out.mapv_inplace(|v| v.log10());
-    out
-}
-
-fn diff_spectrogram(
-    spec: &Array2<f32>,
-    diff_ratio: f32,
-    frame_size: usize,
-    fps: f32,
-    sample_rate: u32,
-) -> Array2<f32> {
-    let hop_size = (sample_rate as f32) / fps;
-    let window = hann_window(frame_size);
-    let max_val = window.iter().cloned().fold(f32::MIN, |a, b| a.max(b));
-    let threshold = diff_ratio * max_val;
-    let mut sample = 0usize;
-    for (i, v) in window.iter().enumerate() {
-        if *v > threshold {
-            sample = i;
-            break;
-        }
-    }
-    let diff_samples = (window.len() as f32) / 2.0 - sample as f32;
-    let diff_frames = (diff_samples / hop_size).round().max(1.0) as usize;
-
-    let num_frames = spec.len_of(Axis(0));
-    let num_bins = spec.len_of(Axis(1));
-    let mut diff = Array2::<f32>::zeros((num_frames, num_bins));
-    for i in diff_frames..num_frames {
-        for j in 0..num_bins {
-            let val = spec[(i, j)] - spec[(i - diff_frames, j)];
-            diff[(i, j)] = if val > 0.0 { val } else { 0.0 };
-        }
-    }
-    diff
-}
-
-fn hstack(a: &Array2<f32>, b: &Array2<f32>) -> Result<Array2<f32>, RhythmError> {
-    if a.len_of(Axis(0)) != b.len_of(Axis(0)) {
-        return Err(RhythmError::InvalidInput(
-            "frame count mismatch in hstack".to_string(),
-        ));
-    }
-    let rows = a.len_of(Axis(0));
-    let cols = a.len_of(Axis(1)) + b.len_of(Axis(1));
-    let mut out = Array2::<f32>::zeros((rows, cols));
-    out.slice_mut(s![.., 0..a.len_of(Axis(1))]).assign(a);
-    out.slice_mut(s![.., a.len_of(Axis(1))..]).assign(b);
-    Ok(out)
 }

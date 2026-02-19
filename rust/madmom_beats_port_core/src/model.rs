@@ -1,7 +1,8 @@
 use crate::features::Features;
 use crate::types::{ActivationOutput, ProgressEvent, ProgressSink, ProgressStage};
 use crate::{CoreConfig, RhythmError};
-use ndarray::{s, Array1, Array2, Axis};
+use ndarray::linalg::general_mat_vec_mul;
+use ndarray::{s, Array1, Array2, ArrayView1, ArrayViewMut1, Axis};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -194,11 +195,12 @@ fn run_network(
     input: &Array2<f32>,
     progress: bool,
 ) -> Result<Array2<f32>, RhythmError> {
-    let mut data = input.clone();
+    let mut data: Option<Array2<f32>> = None;
     for layer in &network.layers {
-        data = apply_layer(layer, model, &data, progress)?;
+        let layer_in = data.as_ref().unwrap_or(input);
+        data = Some(apply_layer(layer, model, layer_in, progress)?);
     }
-    Ok(data)
+    Ok(data.unwrap_or_else(|| input.to_owned()))
 }
 
 fn apply_layer(
@@ -213,10 +215,10 @@ fn apply_layer(
             bias,
             activation,
         } => {
-            let w = model.arrays.array2(weights)?;
-            let b = model.arrays.array1(bias)?;
+            let w = model.arrays.array2_view(weights)?;
+            let b = model.arrays.array1_view(bias)?;
             let mut out = data.dot(&w);
-            add_bias(&mut out, &b);
+            add_bias(&mut out, b);
             apply_activation(&mut out, Activation::from_name(activation)?)?;
             Ok(out)
         }
@@ -226,23 +228,26 @@ fn apply_layer(
             recurrent_weights,
             activation,
         } => {
-            let w = model.arrays.array2(weights)?;
-            let b = model.arrays.array1(bias)?;
-            let r = model.arrays.array2(recurrent_weights)?;
+            let w = model.arrays.array2_view(weights)?;
+            let b = model.arrays.array1_view(bias)?;
+            let r = model.arrays.array2_view(recurrent_weights)?;
             let act = Activation::from_name(activation)?;
             let mut out = data.dot(&w);
-            add_bias(&mut out, &b);
-            let mut prev = Array1::<f32>::zeros(b.len());
+            add_bias(&mut out, b);
+            let hidden = out.len_of(Axis(1));
+            let mut prev = Array1::<f32>::zeros(hidden);
+            let mut recurrent = Array1::<f32>::zeros(hidden);
             let step = progress_step(out.len_of(Axis(0)));
             for i in 0..out.len_of(Axis(0)) {
                 if progress && step > 0 && i % step == 0 {
                     print_progress("recurrent", i, out.len_of(Axis(0)));
                 }
-                let mut row = out.row(i).to_owned();
-                row += &r.t().dot(&prev);
+                recurrent.fill(0.0);
+                general_mat_vec_mul(1.0, &r.t(), &prev, 0.0, &mut recurrent);
+                let mut row = out.row_mut(i);
+                row += &recurrent;
                 apply_activation_row(&mut row, act)?;
-                prev = row.clone();
-                out.row_mut(i).assign(&row);
+                prev.assign(&row);
             }
             Ok(out)
         }
@@ -298,23 +303,33 @@ fn lstm_layer(
 
     let mut prev = Array1::<f32>::zeros(hidden);
     let mut state = Array1::<f32>::zeros(hidden);
+    let mut ig_out = Array1::<f32>::zeros(hidden);
+    let mut fg_out = Array1::<f32>::zeros(hidden);
+    let mut cell_out = Array1::<f32>::zeros(hidden);
+    let mut og_out = Array1::<f32>::zeros(hidden);
+    let mut activated = Array1::<f32>::zeros(hidden);
 
     let step = progress_step(size);
     for i in 0..size {
         if progress && step > 0 && i % step == 0 {
             print_progress("lstm", i, size);
         }
-        let x = data.row(i).to_owned();
-        let ig_out = ig.activate(&x, &prev, Some(&state))?;
-        let fg_out = fg.activate(&x, &prev, Some(&state))?;
-        let cell_out = cg.activate(&x, &prev, None)?;
-        state = &cell_out * &ig_out + &state * &fg_out;
-        let og_out = og.activate(&x, &prev, Some(&state))?;
-        let mut activated = state.clone();
-        apply_activation_row(&mut activated, activation)?;
-        let row = &activated * &og_out;
-        prev = row.clone();
-        out.row_mut(i).assign(&row);
+        let x = data.row(i);
+        ig.activate_into(x, &prev, Some(&state), &mut ig_out)?;
+        fg.activate_into(x, &prev, Some(&state), &mut fg_out)?;
+        cg.activate_into(x, &prev, None, &mut cell_out)?;
+        for j in 0..hidden {
+            state[j] = cell_out[j] * ig_out[j] + state[j] * fg_out[j];
+        }
+        og.activate_into(x, &prev, Some(&state), &mut og_out)?;
+        activated.assign(&state);
+        apply_activation_row_owned(&mut activated, activation)?;
+        let mut out_row = out.row_mut(i);
+        for j in 0..hidden {
+            let v = activated[j] * og_out[j];
+            out_row[j] = v;
+            prev[j] = v;
+        }
     }
     Ok(out)
 }
@@ -341,40 +356,64 @@ impl Gate {
         })
     }
 
-    fn activate(
+    fn activate_into(
         &self,
-        input: &Array1<f32>,
+        input: ArrayView1<'_, f32>,
         prev: &Array1<f32>,
         state: Option<&Array1<f32>>,
-    ) -> Result<Array1<f32>, RhythmError> {
-        let mut out = self.weights.t().dot(input) + &self.bias;
+        out: &mut Array1<f32>,
+    ) -> Result<(), RhythmError> {
+        if out.len() != self.bias.len() {
+            return Err(RhythmError::Model(
+                "gate output buffer length mismatch".to_string(),
+            ));
+        }
+        out.assign(&self.bias);
+        general_mat_vec_mul(1.0, &self.weights.t(), &input, 1.0, out);
+        general_mat_vec_mul(1.0, &self.recurrent.t(), prev, 1.0, out);
         if let Some(ph) = &self.peephole {
             if let Some(st) = state {
-                out += &(st * ph);
+                for idx in 0..out.len() {
+                    out[idx] += st[idx] * ph[idx];
+                }
             }
         }
-        out += &self.recurrent.t().dot(prev);
-        apply_activation_row(&mut out, self.activation)?;
-        Ok(out)
+        apply_activation_row_owned(out, self.activation)?;
+        Ok(())
     }
 }
 
-fn add_bias(out: &mut Array2<f32>, bias: &Array1<f32>) {
+fn add_bias(out: &mut Array2<f32>, bias: ArrayView1<'_, f32>) {
     for mut row in out.rows_mut() {
-        row += bias;
+        row += &bias;
     }
 }
 
 fn apply_activation(out: &mut Array2<f32>, act: Activation) -> Result<(), RhythmError> {
-    for i in 0..out.len_of(Axis(0)) {
-        let mut row = out.row(i).to_owned();
-        apply_activation_row(&mut row, act)?;
-        out.row_mut(i).assign(&row);
+    match act {
+        Activation::Linear => {}
+        Activation::Tanh => out.mapv_inplace(|v| v.tanh()),
+        Activation::Sigmoid => out.mapv_inplace(|v| 0.5 * (1.0 + (0.5 * v).tanh())),
+        Activation::Relu => out.mapv_inplace(|v| if v > 0.0 { v } else { 0.0 }),
+        Activation::Elu => out.mapv_inplace(|v| if v > 0.0 { v } else { v.exp() - 1.0 }),
+        Activation::Softmax => {
+            for mut row in out.rows_mut() {
+                apply_activation_row(&mut row, act)?;
+            }
+        }
     }
     Ok(())
 }
 
-fn apply_activation_row(row: &mut Array1<f32>, act: Activation) -> Result<(), RhythmError> {
+fn apply_activation_row_owned(row: &mut Array1<f32>, act: Activation) -> Result<(), RhythmError> {
+    let mut view = row.view_mut();
+    apply_activation_row(&mut view, act)
+}
+
+fn apply_activation_row(
+    row: &mut ArrayViewMut1<'_, f32>,
+    act: Activation,
+) -> Result<(), RhythmError> {
     match act {
         Activation::Linear => {}
         Activation::Tanh => row.mapv_inplace(|v| v.tanh()),
