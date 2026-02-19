@@ -135,7 +135,7 @@ checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
 
 [[package]]
 name = "madmom_beats_port_core"
-version = "4.0.0"
+version = "4.1.0"
 dependencies = [
  "anyhow",
  "hound",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "madmom_beats_port_ffi"
-version = "4.0.0"
+version = "4.1.0"
 dependencies = [
  "madmom_beats_port_core",
  "serde",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "madmom_beats_port_wasm"
-version = "4.0.0"
+version = "4.1.0"
 dependencies = [
  "js-sys",
  "madmom_beats_port_core",
