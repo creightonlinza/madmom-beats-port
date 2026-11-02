@@ -10,6 +10,30 @@ permissions:
   contents: read
 
 jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned so a new clippy lint can't fail builds until the version is bumped.
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: |
+          cd rust
+          cargo fmt --all -- --check
+      - name: Run clippy
+        run: |
+          cd rust
+          cargo clippy --workspace --all-targets -- -D warnings
+      # Golden fixtures are not in git, so the golden test only runs locally.
+      - name: Run tests
+        run: |
+          cd rust
+          cargo test --workspace --lib --release
+          cargo test -p madmom_beats_port_core --test end_to_end --release
+
   wasm:
     name: wasm
     runs-on: ubuntu-latest
