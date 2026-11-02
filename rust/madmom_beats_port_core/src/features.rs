@@ -15,10 +15,54 @@ pub struct Features {
 struct ResolutionPlan {
     frame_size: usize,
     window: Vec<f32>,
-    filterbank: Array2<f32>,
+    /// Per band: the first bin and the weights up to its last non-zero bin.
+    /// The triangular filters cover a few bins each, so summing only these
+    /// skips almost all of the dense filterbank; the zeros it skips add
+    /// nothing, so the sums come out bit-identical.
+    band_weights: Vec<(usize, Vec<f32>)>,
     num_filters: usize,
     diff_frames: usize,
     column_offset: usize,
+}
+
+fn band_weights(filterbank: &Array2<f32>) -> Vec<(usize, Vec<f32>)> {
+    filterbank
+        .columns()
+        .into_iter()
+        .map(|column| {
+            let first = column.iter().position(|&w| w != 0.0);
+            let last = column.iter().rposition(|&w| w != 0.0);
+            match (first, last) {
+                (Some(first), Some(last)) => {
+                    (first, column.slice(ndarray::s![first..=last]).to_vec())
+                }
+                _ => (0, Vec::new()),
+            }
+        })
+        .collect()
+}
+
+/// Number of feature columns `compute_features` produces for this config.
+pub fn feature_dim(config: &CoreConfig) -> Result<usize, RhythmError> {
+    let feature_cfg = &config.feature;
+    let mut total_cols = 0usize;
+    for (&frame_size, &num_bands) in feature_cfg
+        .frame_sizes
+        .iter()
+        .zip(feature_cfg.num_bands.iter())
+    {
+        let bin_freqs = bin_frequencies(feature_cfg.sample_rate, frame_size, frame_size / 2);
+        let filterbank = build_log_filterbank(
+            &bin_freqs,
+            num_bands,
+            feature_cfg.fmin,
+            feature_cfg.fmax,
+            true,
+            true,
+        )?;
+        total_cols += filterbank.len_of(Axis(1)) * 2;
+    }
+    Ok(total_cols)
 }
 
 pub fn compute_features(
@@ -62,7 +106,7 @@ pub fn compute_features(
         plans.push(ResolutionPlan {
             frame_size,
             window,
-            filterbank,
+            band_weights: band_weights(&filterbank),
             num_filters,
             diff_frames,
             column_offset: total_cols,
@@ -121,56 +165,97 @@ fn fill_resolution_features(
     let mut history = vec![0.0f32; history_rows * num_filters];
 
     for frame_idx in 0..num_frames {
-        write_windowed_frame(
+        feature_frame(
             samples,
             frame_idx,
             hop_size,
-            frame_size,
-            &plan.window,
-            &mut fft_buffer,
+            plan,
+            fft.as_ref(),
+            &mut FrameBuffers {
+                fft: &mut fft_buffer,
+                magnitude: &mut magnitude,
+                log_row: &mut log_row,
+                diff_row: &mut diff_row,
+                history: &mut history,
+            },
+            output,
         );
-
-        fft.process(&mut fft_buffer);
-        for bin in 0..num_bins {
-            magnitude[bin] = fft_buffer[bin].norm();
-        }
-
-        for (band, log_value) in log_row.iter_mut().enumerate().take(num_filters) {
-            let mut sum = 0.0f32;
-            for (bin, magnitude_value) in magnitude.iter().enumerate().take(num_bins) {
-                sum += *magnitude_value * plan.filterbank[(bin, band)];
-            }
-            *log_value = (sum + 1.0).log10();
-        }
-
-        diff_row.fill(0.0);
-        if frame_idx >= plan.diff_frames {
-            let prev_slot = (frame_idx - plan.diff_frames) % history_rows;
-            let prev_offset = prev_slot * num_filters;
-            for (band, diff_value) in diff_row.iter_mut().enumerate().take(num_filters) {
-                let delta = log_row[band] - history[prev_offset + band];
-                *diff_value = if delta > 0.0 { delta } else { 0.0 };
-            }
-        }
-
-        let slot = frame_idx % history_rows;
-        let slot_offset = slot * num_filters;
-        history[slot_offset..slot_offset + num_filters].copy_from_slice(&log_row);
-
-        let log_start = plan.column_offset;
-        let diff_start = log_start + num_filters;
-        for (band, (&log_value, &diff_value)) in log_row
-            .iter()
-            .zip(diff_row.iter())
-            .enumerate()
-            .take(num_filters)
-        {
-            output[(frame_idx, log_start + band)] = log_value;
-            output[(frame_idx, diff_start + band)] = diff_value;
-        }
     }
 
     Ok(())
+}
+
+struct FrameBuffers<'a> {
+    fft: &'a mut [Complex32],
+    magnitude: &'a mut [f32],
+    log_row: &'a mut [f32],
+    diff_row: &'a mut [f32],
+    history: &'a mut [f32],
+}
+
+/// One frame's features. Kept out of line so WebAssembly engines see a
+/// function called once per frame and switch it to optimized code early.
+#[inline(never)]
+fn feature_frame(
+    samples: &[f32],
+    frame_idx: usize,
+    hop_size: f32,
+    plan: &ResolutionPlan,
+    fft: &dyn rustfft::Fft<f32>,
+    buffers: &mut FrameBuffers<'_>,
+    output: &mut Array2<f32>,
+) {
+    let frame_size = plan.frame_size;
+    let num_filters = plan.num_filters;
+    let history_rows = plan.diff_frames.max(1);
+    write_windowed_frame(
+        samples,
+        frame_idx,
+        hop_size,
+        frame_size,
+        &plan.window,
+        buffers.fft,
+    );
+
+    fft.process(buffers.fft);
+    for (magnitude, value) in buffers.magnitude.iter_mut().zip(buffers.fft.iter()) {
+        *magnitude = value.norm();
+    }
+
+    for (log_value, (first, weights)) in buffers.log_row.iter_mut().zip(plan.band_weights.iter()) {
+        let mut sum = 0.0f32;
+        for (magnitude_value, weight) in buffers.magnitude[*first..].iter().zip(weights.iter()) {
+            sum += *magnitude_value * *weight;
+        }
+        *log_value = (sum + 1.0).log10();
+    }
+
+    buffers.diff_row.fill(0.0);
+    if frame_idx >= plan.diff_frames {
+        let prev_slot = (frame_idx - plan.diff_frames) % history_rows;
+        let prev_offset = prev_slot * num_filters;
+        for (band, diff_value) in buffers.diff_row.iter_mut().enumerate().take(num_filters) {
+            let delta = buffers.log_row[band] - buffers.history[prev_offset + band];
+            *diff_value = if delta > 0.0 { delta } else { 0.0 };
+        }
+    }
+
+    let slot = frame_idx % history_rows;
+    let slot_offset = slot * num_filters;
+    buffers.history[slot_offset..slot_offset + num_filters].copy_from_slice(buffers.log_row);
+
+    let log_start = plan.column_offset;
+    let diff_start = log_start + num_filters;
+    for (band, (&log_value, &diff_value)) in buffers
+        .log_row
+        .iter()
+        .zip(buffers.diff_row.iter())
+        .enumerate()
+        .take(num_filters)
+    {
+        output[(frame_idx, log_start + band)] = log_value;
+        output[(frame_idx, diff_start + band)] = diff_value;
+    }
 }
 
 fn frame_count(sample_count: usize, fps: f32, sample_rate: u32) -> Result<usize, RhythmError> {
@@ -361,4 +446,67 @@ fn build_log_filterbank(
         }
     }
     Ok(fb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        band_weights, bin_frequencies, build_log_filterbank, compute_features, feature_dim,
+    };
+    use crate::{CoreConfig, ProgressEvent};
+    use ndarray::{Array2, Axis};
+
+    fn default_filterbanks() -> Vec<Array2<f32>> {
+        let feature = CoreConfig::default().feature;
+        feature
+            .frame_sizes
+            .iter()
+            .zip(feature.num_bands.iter())
+            .map(|(&frame_size, &num_bands)| {
+                let bin_freqs = bin_frequencies(feature.sample_rate, frame_size, frame_size / 2);
+                build_log_filterbank(
+                    &bin_freqs,
+                    num_bands,
+                    feature.fmin,
+                    feature.fmax,
+                    true,
+                    true,
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn band_weights_keep_every_non_zero_weight() {
+        for filterbank in default_filterbanks() {
+            let bands = band_weights(&filterbank);
+            assert_eq!(bands.len(), filterbank.len_of(Axis(1)));
+            for (band, (first, weights)) in bands.iter().enumerate() {
+                for (bin, &dense) in filterbank.column(band).iter().enumerate() {
+                    let sparse = bin
+                        .checked_sub(*first)
+                        .and_then(|offset| weights.get(offset))
+                        .copied()
+                        .unwrap_or(0.0);
+                    assert_eq!(dense.to_bits(), sparse.to_bits(), "band {band} bin {bin}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn band_weights_treat_an_all_zero_band_as_empty() {
+        let bands = band_weights(&Array2::<f32>::zeros((4, 1)));
+        assert_eq!(bands, vec![(0, Vec::new())]);
+    }
+
+    #[test]
+    fn feature_dim_matches_computed_features() {
+        let config = CoreConfig::default();
+        let samples = vec![0.25f32; 44_100];
+        let mut sink = |_event: ProgressEvent| {};
+        let features = compute_features(&samples, &config, &mut sink).unwrap();
+        assert_eq!(features.data.len_of(Axis(1)), feature_dim(&config).unwrap());
+    }
 }

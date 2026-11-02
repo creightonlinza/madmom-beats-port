@@ -13,4 +13,11 @@ serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
 serde.workspace = true
 serde_json.workspace = true
+ndarray.workspace = true
 madmom_beats_port_core = { path = "../madmom_beats_port_core" }
+
+# wasm-opt inlines every function that has a single caller, which folds the
+# per-frame functions (kept out of line so V8 optimizes them early; see
+# dbn::viterbi_frame) back into one long call stuck in V8's baseline tier.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--one-caller-inline-max-function-size", "50"]

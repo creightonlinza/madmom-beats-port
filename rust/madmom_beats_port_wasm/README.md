@@ -19,6 +19,8 @@ allowlist.
 - `analyze_json(samples, sampleRate, configJson?)`
 - `analyze_json_with_model(samples, sampleRate, configJson?, modelJson, weightsNpz)`
 - `analyze_json_with_model_progress(samples, sampleRate, configJson?, modelJson, weightsNpz, progressCb)`
+- Staged analysis for several workers: `feature_columns_json`,
+  `extract_features_json`, `BeatNetworks`, `decode_beats` (see below)
 
 Versioned JSON schemas:
 
@@ -103,6 +105,59 @@ Cancellation:
 
 - No explicit cancellation API yet.
 - Run analysis in a Web Worker and terminate/replace the worker for cancellation.
+
+## Staged analysis (several workers)
+
+WASM runs single-threaded, but the analysis splits into independent steps
+that can run on separate Web Workers, each with its own instance of this
+module. The result is bit-identical to `analyze_json_with_model*` however the
+steps are spread:
+
+- `feature_columns_json(configJson?)`: feature columns per frame.
+- `extract_features_json(samples, sampleRate, configJson?)`: the features as a
+  `Float32Array`, frames x columns in row order.
+- `new BeatNetworks(modelJson, weightsNpz)`: the model, loaded once per worker.
+  - `count()`: number of networks in the ensemble (8 for the default model).
+  - `set_features(features, columns)`: keeps the features for `run`.
+  - `run(index)`: network `index`'s output as a `Float32Array`, frames x
+    outputs in row order.
+- `decode_beats(outputs, networks, columns, configJson?, progressCb?)`: decodes
+  the beats from all networks' outputs concatenated in network order. Returns
+  `{ log_probability, output }`; `output` has the usual beat arrays, or both
+  are `undefined` where no bar length fits the track. A track with no activity
+  above the threshold gives empty beat arrays and a `log_probability` of
+  `-Infinity`.
+
+Each bar length in `dbn.beats_per_bar` can also be decoded on its own worker:
+run `decode_beats` once per length with `beats_per_bar: [n]`, then keep the
+first result (in `beats_per_bar` order) with the highest `log_probability`.
+That is exactly what the single-call decode picks.
+
+```js
+// One worker: the features.
+const columns = feature_columns_json(config);
+const features = extract_features_json(samples, 44100, config);
+const frames = features.length / columns;
+
+// Each network worker: a copy of the features and some network indices.
+const nets = new BeatNetworks(modelJson, weightsNpz);
+nets.set_features(features, columns);
+const outputs = indices.map((index) => nets.run(index));
+
+// Coordinator: every network's output, concatenated in network order.
+const all = concatFloat32(outputsInNetworkOrder);
+const outputColumns = outputsInNetworkOrder[0].length / frames;
+const { output } = decode_beats(all, networkCount, outputColumns, config);
+```
+
+The networks dominate the run time, so spreading them over a few workers
+gives most of the gain.
+
+Workers trade memory for that speed. Each one holds its own copy of the module
+and whatever it is given, and its WASM memory doesn't shrink until the worker
+is terminated. For a 3:40 track, a single `analyze_json_with_model` call peaks
+at about 115 MB of WASM memory, while 8 workers total about 560 MB, and 4 about
+280 MB. Use fewer workers where memory matters, and terminate them when done.
 
 ## Licensing / redistribution
 

@@ -12,6 +12,7 @@ mod types;
 pub use config::{
     validate_core_config, ConfigValidationIssue, CoreConfig, DbnConfig, FeatureConfig, ModelConfig,
 };
+pub use model::BeatModel;
 use types::BeatEvent;
 pub use types::{AnalysisOutput, ProgressEvent, ProgressSink, ProgressStage};
 
@@ -65,15 +66,7 @@ pub fn analyze_with_progress(
     config: &CoreConfig,
     progress: Option<&mut dyn ProgressSink>,
 ) -> Result<AnalysisOutput, RhythmError> {
-    if let Err(issue) = validate_core_config(config) {
-        return Err(RhythmError::InvalidInput(format!("config {}", issue)));
-    }
-    if sample_rate != config.feature.sample_rate {
-        return Err(RhythmError::InvalidInput(format!(
-            "expected {} Hz mono samples; got {}",
-            config.feature.sample_rate, sample_rate
-        )));
-    }
+    validate_input(sample_rate, config)?;
 
     let mut noop = NoopProgressSink;
     let sink: &mut dyn ProgressSink = match progress {
@@ -106,15 +99,7 @@ pub fn analyze_with_progress_and_model_data(
     model_json: &str,
     weights_npz: &[u8],
 ) -> Result<AnalysisOutput, RhythmError> {
-    if let Err(issue) = validate_core_config(config) {
-        return Err(RhythmError::InvalidInput(format!("config {}", issue)));
-    }
-    if sample_rate != config.feature.sample_rate {
-        return Err(RhythmError::InvalidInput(format!(
-            "expected {} Hz mono samples; got {}",
-            config.feature.sample_rate, sample_rate
-        )));
-    }
+    validate_input(sample_rate, config)?;
 
     let mut noop = NoopProgressSink;
     let sink: &mut dyn ProgressSink = match progress {
@@ -136,6 +121,73 @@ pub fn analyze_with_progress_and_model_data(
     let beats = dbn::decode(&activations, config, sink).map_err(|e| with_stage_error("dbn", e))?;
     emit_stage_telemetry("dbn:end");
     build_analysis_output(beats, config.feature.fps)
+}
+
+// Staged analysis: the same result as `analyze_with_model_data`, in steps a
+// caller can parallelize. Run `extract_features`, then every network of a
+// `BeatModel` (in any order or place), then `decode_network_outputs` with the
+// outputs in network order. That decode can also run once per bar length
+// (`config.dbn.beats_per_bar` = [n]); the first highest log probability over
+// `beats_per_bar` is the full decode's result.
+
+/// Number of feature columns `extract_features` produces.
+pub fn feature_columns(config: &CoreConfig) -> Result<usize, RhythmError> {
+    validate_config(config)?;
+    features::feature_dim(config)
+}
+
+/// Features shaped frames x `feature_columns`.
+pub fn extract_features(
+    samples: &[f32],
+    sample_rate: u32,
+    config: &CoreConfig,
+) -> Result<ndarray::Array2<f32>, RhythmError> {
+    validate_input(sample_rate, config)?;
+    let mut noop = NoopProgressSink;
+    features::compute_features(samples, config, &mut noop)
+        .map(|f| f.data)
+        .map_err(|e| with_stage_error("features", e))
+}
+
+/// Decodes beats from the networks' outputs (in network order), returning
+/// them with the winning bar model's log probability, or `None` where the
+/// full analysis would fail because no bar length fits.
+pub fn decode_network_outputs(
+    outputs: Vec<ndarray::Array2<f32>>,
+    config: &CoreConfig,
+    progress: Option<&mut dyn ProgressSink>,
+) -> Result<Option<(AnalysisOutput, f64)>, RhythmError> {
+    validate_config(config)?;
+    let mut noop = NoopProgressSink;
+    let sink: &mut dyn ProgressSink = match progress {
+        Some(s) => s,
+        None => &mut noop,
+    };
+    let activations =
+        model::average_network_outputs(outputs).map_err(|e| with_stage_error("inference", e))?;
+    match dbn::decode_scored(&activations, config, sink).map_err(|e| with_stage_error("dbn", e))? {
+        Some((beats, logp)) => Ok(Some((
+            build_analysis_output(beats, config.feature.fps)?,
+            logp,
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn validate_config(config: &CoreConfig) -> Result<(), RhythmError> {
+    validate_core_config(config)
+        .map_err(|issue| RhythmError::InvalidInput(format!("config {}", issue)))
+}
+
+fn validate_input(sample_rate: u32, config: &CoreConfig) -> Result<(), RhythmError> {
+    validate_config(config)?;
+    if sample_rate != config.feature.sample_rate {
+        return Err(RhythmError::InvalidInput(format!(
+            "expected {} Hz mono samples; got {}",
+            config.feature.sample_rate, sample_rate
+        )));
+    }
+    Ok(())
 }
 
 fn build_analysis_output(beats: Vec<BeatEvent>, fps: f32) -> Result<AnalysisOutput, RhythmError> {
