@@ -13,6 +13,10 @@ Versioned JSON schemas:
 - `docs/schemas/analysis-output.v1.schema.json`
 - `docs/schemas/config.v1.example.json`
 
+For 16-bit audio passed as `i16 / 32768`, set `feature.int16_scaling` to `true`
+to match madmom on the same 16-bit file; downmix stereo to the integer channel
+mean, truncated, as madmom does.
+
 `madmom_beats_port_analyze_json*` returns beat arrays:
 
 ```json
@@ -199,9 +203,9 @@ Android build note:
 ## Licensing / redistribution
 
 When you ship the compiled artifact (`.so`/`.a`/`.dylib`), include `LICENSE`
-and `NOTICE` alongside it. The source code is BSD 2-Clause and the core is a
-port of madmom, so binary redistributions must reproduce the upstream madmom
-copyright notice.
+and `NOTICE` alongside it. The source code is BSD 2-Clause (NumPy-derived parts BSD 3-Clause), and binary
+redistributions must reproduce the notices in `NOTICE` (madmom, NumPy and the
+`libm` crate).
 
 If you distribute model files with the binary, also include
 `LICENSES/MODELS_CC_BY_NC_SA.txt` from the repo root and mark that

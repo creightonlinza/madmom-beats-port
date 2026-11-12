@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Ported from madmom (BSD 2-Clause, Copyright (c) 2012-2014 JKU / OFAI). See NOTICE.
 
+use crate::fft::RealFft;
+use crate::numeric;
 use crate::{CoreConfig, ProgressEvent, ProgressSink, ProgressStage, RhythmError};
 use ndarray::{Array2, Axis};
-use rustfft::num_complex::Complex32;
-use rustfft::FftPlanner;
 
 #[derive(Debug, Clone)]
 pub struct Features {
@@ -14,7 +14,7 @@ pub struct Features {
 
 struct ResolutionPlan {
     frame_size: usize,
-    window: Vec<f32>,
+    window: Vec<f64>,
     /// Per band: the first bin and the weights up to its last non-zero bin.
     /// The triangular filters cover a few bins each, so summing only these
     /// skips almost all of the dense filterbank; the zeros it skips add
@@ -22,6 +22,7 @@ struct ResolutionPlan {
     band_weights: Vec<(usize, Vec<f32>)>,
     num_filters: usize,
     diff_frames: usize,
+    positive_diffs: bool,
     column_offset: usize,
 }
 
@@ -96,19 +97,20 @@ pub fn compute_features(
             true,
         )?;
         let num_filters = filterbank.len_of(Axis(1));
-        let window = hann_window(frame_size);
+        let hann = hann_window(frame_size);
         let diff_frames = diff_frames_from_window(
-            &window,
+            &hann,
             feature_cfg.diff_ratio,
             feature_cfg.fps,
             feature_cfg.sample_rate,
         );
         plans.push(ResolutionPlan {
             frame_size,
-            window,
+            window: fft_window(&hann, feature_cfg.int16_scaling),
             band_weights: band_weights(&filterbank),
             num_filters,
             diff_frames,
+            positive_diffs: feature_cfg.positive_diffs,
             column_offset: total_cols,
         });
         total_cols += num_filters * 2;
@@ -148,15 +150,14 @@ fn fill_resolution_features(
     plan: &ResolutionPlan,
     output: &mut Array2<f32>,
 ) -> Result<(), RhythmError> {
-    let hop_size = sample_rate as f32 / fps;
+    let hop_size = sample_rate as f64 / fps as f64;
     let frame_size = plan.frame_size;
     let num_bins = frame_size / 2;
     let num_filters = plan.num_filters;
 
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(frame_size);
-
-    let mut fft_buffer = vec![Complex32::new(0.0, 0.0); frame_size];
+    let mut fft = RealFft::new(frame_size);
+    let mut frame = vec![0.0f64; frame_size];
+    let mut spectrum = vec![(0.0f32, 0.0f32); num_bins];
     let mut magnitude = vec![0.0f32; num_bins];
     let mut log_row = vec![0.0f32; num_filters];
     let mut diff_row = vec![0.0f32; num_filters];
@@ -170,9 +171,10 @@ fn fill_resolution_features(
             frame_idx,
             hop_size,
             plan,
-            fft.as_ref(),
+            &mut fft,
             &mut FrameBuffers {
-                fft: &mut fft_buffer,
+                frame: &mut frame,
+                spectrum: &mut spectrum,
                 magnitude: &mut magnitude,
                 log_row: &mut log_row,
                 diff_row: &mut diff_row,
@@ -186,7 +188,8 @@ fn fill_resolution_features(
 }
 
 struct FrameBuffers<'a> {
-    fft: &'a mut [Complex32],
+    frame: &'a mut [f64],
+    spectrum: &'a mut [(f32, f32)],
     magnitude: &'a mut [f32],
     log_row: &'a mut [f32],
     diff_row: &'a mut [f32],
@@ -199,9 +202,9 @@ struct FrameBuffers<'a> {
 fn feature_frame(
     samples: &[f32],
     frame_idx: usize,
-    hop_size: f32,
+    hop_size: f64,
     plan: &ResolutionPlan,
-    fft: &dyn rustfft::Fft<f32>,
+    fft: &mut RealFft,
     buffers: &mut FrameBuffers<'_>,
     output: &mut Array2<f32>,
 ) {
@@ -214,20 +217,17 @@ fn feature_frame(
         hop_size,
         frame_size,
         &plan.window,
-        buffers.fft,
+        buffers.frame,
     );
 
-    fft.process(buffers.fft);
-    for (magnitude, value) in buffers.magnitude.iter_mut().zip(buffers.fft.iter()) {
-        *magnitude = value.norm();
+    fft.process(buffers.frame, buffers.spectrum);
+    for (magnitude, &(re, im)) in buffers.magnitude.iter_mut().zip(buffers.spectrum.iter()) {
+        *magnitude = numeric::complex_abs(re, im);
     }
 
     for (log_value, (first, weights)) in buffers.log_row.iter_mut().zip(plan.band_weights.iter()) {
-        let mut sum = 0.0f32;
-        for (magnitude_value, weight) in buffers.magnitude[*first..].iter().zip(weights.iter()) {
-            sum += *magnitude_value * *weight;
-        }
-        *log_value = (sum + 1.0).log10();
+        let sum = numeric::dot(&buffers.magnitude[*first..*first + weights.len()], weights);
+        *log_value = numeric::log10(sum + 1.0);
     }
 
     buffers.diff_row.fill(0.0);
@@ -236,7 +236,11 @@ fn feature_frame(
         let prev_offset = prev_slot * num_filters;
         for (band, diff_value) in buffers.diff_row.iter_mut().enumerate().take(num_filters) {
             let delta = buffers.log_row[band] - buffers.history[prev_offset + band];
-            *diff_value = if delta > 0.0 { delta } else { 0.0 };
+            *diff_value = if delta > 0.0 || !plan.positive_diffs {
+                delta
+            } else {
+                0.0
+            };
         }
     }
 
@@ -262,19 +266,19 @@ fn frame_count(sample_count: usize, fps: f32, sample_rate: u32) -> Result<usize,
     if fps <= 0.0 {
         return Err(RhythmError::InvalidInput("fps must be > 0".to_string()));
     }
-    let hop_size = sample_rate as f32 / fps;
-    Ok(((sample_count as f32) / hop_size).ceil() as usize)
+    let hop_size = sample_rate as f64 / fps as f64;
+    Ok(((sample_count as f64) / hop_size).ceil() as usize)
 }
 
 fn write_windowed_frame(
     samples: &[f32],
     frame_idx: usize,
-    hop_size: f32,
+    hop_size: f64,
     frame_size: usize,
-    window: &[f32],
-    out: &mut [Complex32],
+    window: &[f64],
+    out: &mut [f64],
 ) {
-    let ref_sample = (frame_idx as f32 * hop_size).floor() as isize;
+    let ref_sample = (frame_idx as f64 * hop_size).floor() as isize;
     let start = ref_sample - (frame_size / 2) as isize;
     for i in 0..frame_size {
         let sample_idx = start + i as isize;
@@ -283,14 +287,14 @@ fn write_windowed_frame(
         } else {
             samples[sample_idx as usize]
         };
-        out[i] = Complex32::new(sample * window[i], 0.0);
+        out[i] = sample as f64 * window[i];
     }
 }
 
-fn diff_frames_from_window(window: &[f32], diff_ratio: f32, fps: f32, sample_rate: u32) -> usize {
-    let hop_size = (sample_rate as f32) / fps;
-    let max_val = window.iter().copied().fold(f32::MIN, f32::max);
-    let threshold = diff_ratio * max_val;
+fn diff_frames_from_window(window: &[f64], diff_ratio: f32, fps: f32, sample_rate: u32) -> usize {
+    let hop_size = (sample_rate as f64) / fps as f64;
+    let max_val = window.iter().copied().fold(f64::MIN, f64::max);
+    let threshold = diff_ratio as f64 * max_val;
     let mut sample = 0usize;
     for (i, v) in window.iter().enumerate() {
         if *v > threshold {
@@ -298,21 +302,29 @@ fn diff_frames_from_window(window: &[f32], diff_ratio: f32, fps: f32, sample_rat
             break;
         }
     }
-    let diff_samples = (window.len() as f32) / 2.0 - sample as f32;
-    (diff_samples / hop_size).round().max(1.0) as usize
+    let diff_samples = (window.len() as f64) / 2.0 - sample as f64;
+    (diff_samples / hop_size).round_ties_even().max(1.0) as usize
 }
 
-fn hann_window(frame_size: usize) -> Vec<f32> {
-    if frame_size == 0 {
-        return vec![];
-    }
-    let n = frame_size as f32;
+/// `np.hanning(frame_size)`: `0.5 + 0.5 * cos(pi * k / (n - 1))` for
+/// `k = 1 - n, 3 - n, ..., n - 1`.
+fn hann_window(frame_size: usize) -> Vec<f64> {
+    let n = frame_size as f64;
     (0..frame_size)
         .map(|i| {
-            let x = i as f32;
-            0.5 - 0.5 * (2.0 * std::f32::consts::PI * x / (n - 1.0)).cos()
+            let k = 2.0 * i as f64 - (n - 1.0);
+            0.5 + 0.5 * libm::cos(std::f64::consts::PI * k / (n - 1.0))
         })
         .collect()
+}
+
+/// madmom scales an int16 signal's window by `1 / i16::MAX`; samples arrive as `i16 / 32768`, so undo that.
+fn fft_window(hann: &[f64], int16_scaling: bool) -> Vec<f64> {
+    if int16_scaling {
+        hann.iter().map(|w| w / i16::MAX as f64 * 32768.0).collect()
+    } else {
+        hann.to_vec()
+    }
 }
 
 fn bin_frequencies(sample_rate: u32, fft_size: usize, num_bins: usize) -> Vec<f32> {
@@ -326,14 +338,14 @@ fn log_frequencies(bands_per_octave: usize, fmin: f32, fmax: f32, fref: f32) -> 
     let fmin64 = fmin as f64;
     let fmax64 = fmax as f64;
     let fref64 = fref as f64;
-    let left = (fmin64 / fref64).log2() * bpo;
-    let right = (fmax64 / fref64).log2() * bpo;
+    let left = libm::log2(fmin64 / fref64) * bpo;
+    let right = libm::log2(fmax64 / fref64) * bpo;
     let left_i = left.floor() as i64;
     let right_i = right.ceil() as i64;
 
     let mut freqs = Vec::new();
     for i in left_i..right_i {
-        let freq = fref64 * 2f64.powf(i as f64 / bpo);
+        let freq = fref64 * libm::pow(2.0, i as f64 / bpo);
         if freq >= fmin64 && freq <= fmax64 {
             freqs.push(freq as f32);
         }
@@ -374,20 +386,11 @@ fn triangular_filter(start: usize, center: usize, stop: usize, norm: bool) -> Ve
         return vec![];
     }
     let center_rel = center.saturating_sub(start);
-    let mut data = vec![0.0f32; length];
-    if center_rel > 0 {
-        for (i, v) in data.iter_mut().enumerate().take(center_rel) {
-            *v = (i as f32) / (center_rel as f32);
-        }
-    }
     let fall_len = length.saturating_sub(center_rel);
-    if fall_len > 0 {
-        for i in 0..fall_len {
-            data[center_rel + i] = 1.0 - (i as f32) / (fall_len as f32);
-        }
-    }
+    let mut data = linspace_open(0.0, 1.0, center_rel);
+    data.extend(linspace_open(1.0, 0.0, fall_len));
     if norm {
-        let sum: f32 = data.iter().sum();
+        let sum = numeric::pairwise_sum(&data);
         if sum > 0.0 {
             for v in &mut data {
                 *v /= sum;
@@ -395,6 +398,12 @@ fn triangular_filter(start: usize, center: usize, stop: usize, norm: bool) -> Ve
         }
     }
     data
+}
+
+/// `np.linspace(start, stop, num, endpoint=False)` cast to `float32`.
+fn linspace_open(start: f64, stop: f64, num: usize) -> Vec<f32> {
+    let step = (stop - start) / num as f64;
+    (0..num).map(|i| (i as f64 * step + start) as f32).collect()
 }
 
 fn build_log_filterbank(
@@ -452,6 +461,7 @@ fn build_log_filterbank(
 mod tests {
     use super::{
         band_weights, bin_frequencies, build_log_filterbank, compute_features, feature_dim,
+        fft_window,
     };
     use crate::{CoreConfig, ProgressEvent};
     use ndarray::{Array2, Axis};
@@ -508,5 +518,12 @@ mod tests {
         let mut sink = |_event: ProgressEvent| {};
         let features = compute_features(&samples, &config, &mut sink).unwrap();
         assert_eq!(features.data.len_of(Axis(1)), feature_dim(&config).unwrap());
+    }
+
+    #[test]
+    fn int16_scaling_scales_window_by_32768_over_32767() {
+        assert_eq!(fft_window(&[1.0, 0.5], false), vec![1.0, 0.5]);
+        let scale = 32768.0 / 32767.0;
+        assert_eq!(fft_window(&[1.0, 0.5], true), vec![scale, 0.5 * scale]);
     }
 }

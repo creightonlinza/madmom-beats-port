@@ -5,8 +5,10 @@
 mod config;
 mod dbn;
 mod features;
+mod fft;
 mod io;
 mod model;
+mod numeric;
 mod types;
 
 pub use config::{
@@ -281,7 +283,7 @@ fn wasm_memory_usage() -> (usize, usize) {
     #[cfg(target_arch = "wasm32")]
     {
         let pages = core::arch::wasm32::memory_size(0);
-        return (pages, pages.saturating_mul(65_536));
+        (pages, pages.saturating_mul(65_536))
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

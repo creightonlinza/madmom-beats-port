@@ -15,7 +15,8 @@
     "fmin": 30.0,
     "fmax": 17000.0,
     "diff_ratio": 0.5,
-    "positive_diffs": true
+    "positive_diffs": true,
+    "int16_scaling": false
   },
   "model": {
     "model_json": "/data/user/0/<app>/files/madmom_beats_port_models/downbeats_blstm.json",

@@ -2,7 +2,8 @@
 
 //! Full-pipeline tests on generated audio, so they need no local fixtures.
 //!
-//! The snapshots in `tests/data/` hold the expected results. Set
+//! The snapshots in `tests/data/` hold the expected results. The core uses no
+//! platform math library, so they must match bit for bit on every platform. Set
 //! `UPDATE_SNAPSHOTS=1` to rewrite them, only for an intended change to results
 //! that `golden_parity_all` also accepts.
 
@@ -15,13 +16,12 @@ use std::path::PathBuf;
 const SAMPLE_RATE: u32 = 44_100;
 const BEAT_INTERVAL_SEC: f32 = 0.5;
 
-// Wide enough for floating-point differences between platforms, which reach
-// about 16 ms and 0.07 between native and WASM builds.
-const TIME_TOLERANCE_SEC: f32 = 0.02;
-const CONFIDENCE_TOLERANCE: f32 = 0.1;
+/// How far a detected beat may land from its click.
+const CLICK_TOLERANCE_SEC: f32 = 0.02;
 
-/// Deterministic click track: decaying sine bursts, with every bar's first
-/// beat louder and lower.
+/// Click track of decaying sine bursts, with every bar's first beat louder
+/// and lower. The `libm` functions make the samples the same on every
+/// platform.
 fn click_track(seconds: usize, interval_sec: f32, beats_per_bar: usize) -> Vec<f32> {
     const BURST_SAMPLES: usize = 4_410;
     let sample_rate = SAMPLE_RATE as usize;
@@ -34,9 +34,9 @@ fn click_track(seconds: usize, interval_sec: f32, beats_per_bar: usize) -> Vec<f
         let start = beat * interval;
         for i in 0..BURST_SAMPLES.min(samples.len() - start) {
             let t = i as f32 / SAMPLE_RATE as f32;
-            let envelope = (-t * 40.0).exp();
+            let envelope = libm::expf(-t * 40.0);
             samples[start + i] +=
-                amplitude * envelope * (2.0 * std::f32::consts::PI * frequency * t).sin();
+                amplitude * envelope * libm::sinf(2.0 * std::f32::consts::PI * frequency * t);
         }
     }
     samples
@@ -90,27 +90,7 @@ fn assert_matches_snapshot(name: &str, actual: &AnalysisOutput) {
     }
     let expected: AnalysisOutput =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(expected.fps, actual.fps);
-    assert_eq!(expected.beat_numbers, actual.beat_numbers);
-    for (i, (e, a)) in expected
-        .beat_times
-        .iter()
-        .zip(&actual.beat_times)
-        .enumerate()
-    {
-        assert!((e - a).abs() <= TIME_TOLERANCE_SEC, "beat {i}: {e} vs {a}");
-    }
-    for (i, (e, a)) in expected
-        .beat_confidences
-        .iter()
-        .zip(&actual.beat_confidences)
-        .enumerate()
-    {
-        assert!(
-            (e - a).abs() <= CONFIDENCE_TOLERANCE,
-            "confidence {i}: {e} vs {a}"
-        );
-    }
+    assert_bits_equal(&expected, actual);
 }
 
 /// Beats land on the clicks, and the bar position counts up from each louder
@@ -120,7 +100,7 @@ fn assert_follows_click_track(output: &AnalysisOutput, beats_per_bar: u32) {
     for (time, &number) in output.beat_times.iter().zip(&output.beat_numbers) {
         let beat = (time / BEAT_INTERVAL_SEC).round();
         assert!(
-            (time - beat * BEAT_INTERVAL_SEC).abs() <= TIME_TOLERANCE_SEC,
+            (time - beat * BEAT_INTERVAL_SEC).abs() <= CLICK_TOLERANCE_SEC,
             "beat at {time} is off the click grid"
         );
         let expected = (beat as u32) % beats_per_bar + 1;

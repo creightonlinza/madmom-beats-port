@@ -2,10 +2,10 @@
 // Ported from madmom (BSD 2-Clause, Copyright (c) 2012-2014 JKU / OFAI). See NOTICE.
 
 use crate::features::Features;
+use crate::numeric;
 use crate::types::{ActivationOutput, ProgressEvent, ProgressSink, ProgressStage};
 use crate::{CoreConfig, RhythmError};
-use ndarray::linalg::general_mat_vec_mul;
-use ndarray::{s, Array1, Array2, ArrayView1, ArrayViewMut1, Axis};
+use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -286,8 +286,7 @@ fn apply_layer(
         } => {
             let w = model.arrays.array2_view(weights)?;
             let b = model.arrays.array1_view(bias)?;
-            let mut out = data.dot(&w);
-            add_bias(&mut out, b);
+            let mut out = matmul_plus_bias(data, &w, b)?;
             apply_activation(&mut out, Activation::from_name(activation)?)?;
             Ok(out)
         }
@@ -301,9 +300,13 @@ fn apply_layer(
             let b = model.arrays.array1_view(bias)?;
             let r = model.arrays.array2_view(recurrent_weights)?;
             let act = Activation::from_name(activation)?;
-            let mut out = data.dot(&w);
-            add_bias(&mut out, b);
+            let mut out = matmul_plus_bias(data, &w, b)?;
             let hidden = out.len_of(Axis(1));
+            if r.dim() != (hidden, hidden) {
+                return Err(RhythmError::Model(
+                    "recurrent weight shape mismatch".to_string(),
+                ));
+            }
             let mut prev = Array1::<f32>::zeros(hidden);
             let mut recurrent = Array1::<f32>::zeros(hidden);
             let step = progress_step(out.len_of(Axis(0)));
@@ -311,8 +314,7 @@ fn apply_layer(
                 if progress && step > 0 && i % step == 0 {
                     print_progress("recurrent", i, out.len_of(Axis(0)));
                 }
-                recurrent.fill(0.0);
-                general_mat_vec_mul(1.0, &r.t(), &prev, 0.0, &mut recurrent);
+                vec_matmul(&prev, &r, &mut recurrent);
                 let mut row = out.row_mut(i);
                 row += &recurrent;
                 apply_activation_row(&mut row, act)?;
@@ -383,9 +385,11 @@ fn lstm_forward(
     let inputs = data.len_of(Axis(1));
     let hidden = ig.bias.len();
     for gate in gates {
-        if gate.bias.len() != hidden
+        if hidden == 0
+            || gate.bias.len() != hidden
             || gate.weights.dim() != (inputs, hidden)
             || gate.recurrent.dim() != (hidden, hidden)
+            || gate.peephole.as_ref().is_some_and(|p| p.len() != hidden)
         {
             return Err(RhythmError::Model("lstm gate shape mismatch".to_string()));
         }
@@ -395,8 +399,8 @@ fn lstm_forward(
     // input (and recurrent) products then accumulate for every unit in one
     // pass over contiguous memory, with many independent sums in flight
     // instead of one long dependency chain. Each unit sums its products from
-    // input 0 upwards, starting at zero: float addition isn't associative, so
-    // another order would change the results.
+    // input 0 upwards, starting at zero: the order of madmom's `np.dot` (see
+    // `numeric::dot`).
     let width = 4 * hidden;
     let mut input_weights = vec![0.0f32; inputs * width];
     let mut recurrent_weights = vec![0.0f32; hidden * width];
@@ -477,7 +481,7 @@ fn lstm_frame(
     buffers.input_sums.fill(0.0);
     for (&x, weights) in x.iter().zip(input_weights.chunks_exact(width)) {
         for (sum, &w) in buffers.input_sums.iter_mut().zip(weights) {
-            *sum += w * x;
+            *sum += x * w;
         }
     }
     buffers.recurrent_sums.fill(0.0);
@@ -487,7 +491,7 @@ fn lstm_frame(
         .zip(recurrent_weights.chunks_exact(width))
     {
         for (sum, &w) in buffers.recurrent_sums.iter_mut().zip(weights) {
-            *sum += w * p;
+            *sum += p * w;
         }
     }
     let (input_sums, recurrent_sums, gate_out) = (
@@ -574,23 +578,21 @@ impl Gate {
                 "gate output buffer length mismatch".to_string(),
             ));
         }
-        out.assign(&self.bias);
-        general_mat_vec_mul(1.0, &self.weights.t(), &input, 1.0, out);
-        general_mat_vec_mul(1.0, &self.recurrent.t(), prev, 1.0, out);
-        if let Some(ph) = &self.peephole {
-            if let Some(st) = state {
-                for idx in 0..out.len() {
-                    out[idx] += st[idx] * ph[idx];
-                }
-            }
+        vec_matmul(&input.to_owned(), &self.weights.view(), out);
+        *out += &self.bias;
+        if let (Some(ph), Some(st)) = (&self.peephole, state) {
+            *out += &(st * ph);
         }
-        apply_activation_row_owned(out, self.activation)?;
+        let mut recurrent = Array1::zeros(out.len());
+        vec_matmul(prev, &self.recurrent.view(), &mut recurrent);
+        *out += &recurrent;
+        apply_activation_row(&mut out.view_mut(), self.activation)?;
         Ok(())
     }
 
     /// Finishes a gate from its input and recurrent dot products, already
-    /// summed: bias, plus inputs, plus recurrent, plus peephole, then the
-    /// activation.
+    /// summed, adding the terms in the order of madmom's `Gate.activate`:
+    /// inputs plus bias, plus peephole, plus recurrent, then the activation.
     fn activate_from_sums(
         &self,
         input_sums: &[f32],
@@ -599,43 +601,54 @@ impl Gate {
         out: &mut [f32],
     ) -> Result<(), RhythmError> {
         for j in 0..out.len() {
-            out[j] = self.bias[j] + input_sums[j] + recurrent_sums[j];
+            out[j] = input_sums[j] + self.bias[j];
         }
         if let (Some(ph), Some(st)) = (&self.peephole, state) {
             for j in 0..out.len() {
                 out[j] += st[j] * ph[j];
             }
         }
+        for j in 0..out.len() {
+            out[j] += recurrent_sums[j];
+        }
         apply_activation_row(&mut ArrayViewMut1::from(out), self.activation)
     }
 }
 
-fn add_bias(out: &mut Array2<f32>, bias: ArrayView1<'_, f32>) {
-    for mut row in out.rows_mut() {
-        row += &bias;
+/// `data · weights + bias`, each product a `numeric::dot`, as madmom's
+/// `np.dot(data, weights) + bias`.
+fn matmul_plus_bias(
+    data: &Array2<f32>,
+    weights: &ArrayView2<'_, f32>,
+    bias: ArrayView1<'_, f32>,
+) -> Result<Array2<f32>, RhythmError> {
+    if weights.nrows() != data.ncols() || bias.len() != weights.ncols() {
+        return Err(RhythmError::Model("layer shape mismatch".to_string()));
+    }
+    let columns: Vec<Vec<f32>> = weights.columns().into_iter().map(|c| c.to_vec()).collect();
+    let mut out = Array2::<f32>::zeros((data.nrows(), columns.len()));
+    for (row, mut out_row) in data.rows().into_iter().zip(out.rows_mut()) {
+        let row = row.to_vec();
+        for ((value, column), &b) in out_row.iter_mut().zip(&columns).zip(bias.iter()) {
+            *value = numeric::dot(&row, column) + b;
+        }
+    }
+    Ok(out)
+}
+
+/// `vector · matrix` into `out`, each element a `numeric::dot`.
+fn vec_matmul(vector: &Array1<f32>, matrix: &ArrayView2<'_, f32>, out: &mut Array1<f32>) {
+    let vector = vector.to_vec();
+    for (value, column) in out.iter_mut().zip(matrix.columns()) {
+        *value = numeric::dot(&vector, &column.to_vec());
     }
 }
 
 fn apply_activation(out: &mut Array2<f32>, act: Activation) -> Result<(), RhythmError> {
-    match act {
-        Activation::Linear => {}
-        Activation::Tanh => out.mapv_inplace(|v| v.tanh()),
-        Activation::Sigmoid => out.mapv_inplace(|v| 0.5 * (1.0 + (0.5 * v).tanh())),
-        Activation::Relu => out.mapv_inplace(|v| if v > 0.0 { v } else { 0.0 }),
-        Activation::Elu => out.mapv_inplace(|v| if v > 0.0 { v } else { v.exp() - 1.0 }),
-        Activation::Softmax => {
-            for mut row in out.rows_mut() {
-                apply_activation_row(&mut row, act)?;
-            }
-        }
+    for mut row in out.rows_mut() {
+        apply_activation_row(&mut row, act)?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn apply_activation_row_owned(row: &mut Array1<f32>, act: Activation) -> Result<(), RhythmError> {
-    let mut view = row.view_mut();
-    apply_activation_row(&mut view, act)
 }
 
 fn apply_activation_row(
@@ -644,15 +657,15 @@ fn apply_activation_row(
 ) -> Result<(), RhythmError> {
     match act {
         Activation::Linear => {}
-        Activation::Tanh => row.mapv_inplace(|v| v.tanh()),
-        Activation::Sigmoid => row.mapv_inplace(|v| 0.5 * (1.0 + (0.5 * v).tanh())),
+        Activation::Tanh => row.mapv_inplace(numeric::tanh),
+        Activation::Sigmoid => row.mapv_inplace(numeric::sigmoid),
         Activation::Relu => row.mapv_inplace(|v| if v > 0.0 { v } else { 0.0 }),
-        Activation::Elu => row.mapv_inplace(|v| if v > 0.0 { v } else { v.exp() - 1.0 }),
+        Activation::Elu => row.mapv_inplace(|v| if v > 0.0 { v } else { numeric::exp(v) - 1.0 }),
         Activation::Softmax => {
             let max = row.iter().cloned().fold(f32::MIN, f32::max);
             let mut sum = 0.0;
             for v in row.iter_mut() {
-                *v = (*v - max).exp();
+                *v = numeric::exp(*v - max);
                 sum += *v;
             }
             if sum > 0.0 {
@@ -758,7 +771,7 @@ mod tests {
             og.activate_into(x, &prev, Some(&state), &mut og_out)
                 .unwrap();
             let mut activated = state.clone();
-            super::apply_activation_row_owned(&mut activated, activation).unwrap();
+            super::apply_activation_row(&mut activated.view_mut(), activation).unwrap();
             for j in 0..hidden {
                 let v = activated[j] * og_out[j];
                 out[(i, j)] = v;

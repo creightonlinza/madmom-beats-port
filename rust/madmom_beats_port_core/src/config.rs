@@ -14,6 +14,10 @@ pub struct FeatureConfig {
     pub fmax: f32,
     pub diff_ratio: f32,
     pub positive_diffs: bool,
+    /// The samples are 16-bit PCM as `i16 / 32768`; scale them as madmom
+    /// scales a 16-bit signal (by `1 / i16::MAX`) instead of as floats.
+    #[serde(default)]
+    pub int16_scaling: bool,
 }
 
 impl Default for FeatureConfig {
@@ -27,6 +31,7 @@ impl Default for FeatureConfig {
             fmax: 17_000.0,
             diff_ratio: 0.5,
             positive_diffs: true,
+            int16_scaling: false,
         }
     }
 }
@@ -114,13 +119,20 @@ pub fn validate_core_config(config: &CoreConfig) -> Result<(), ConfigValidationI
             "must be > 0",
         ));
     }
-    if !feature.fps.is_finite() || feature.fps <= 0.0 {
-        return Err(ConfigValidationIssue::new("feature.fps", "must be > 0"));
+    if !feature.fps.is_finite() || feature.fps <= 0.0 || feature.fps > feature.sample_rate as f32 {
+        return Err(ConfigValidationIssue::new(
+            "feature.fps",
+            "must be > 0 and <= feature.sample_rate",
+        ));
     }
-    if feature.frame_sizes.contains(&0) {
+    if feature
+        .frame_sizes
+        .iter()
+        .any(|&n| !(4..=1 << 16).contains(&n) || !n.is_power_of_two())
+    {
         return Err(ConfigValidationIssue::new(
             "feature.frame_sizes",
-            "all values must be > 0",
+            "all values must be powers of two from 4 to 65536",
         ));
     }
     if feature.frame_sizes.windows(2).any(|w| w[0] >= w[1]) {
@@ -129,10 +141,10 @@ pub fn validate_core_config(config: &CoreConfig) -> Result<(), ConfigValidationI
             "values must be strictly increasing",
         ));
     }
-    if feature.num_bands.contains(&0) {
+    if feature.num_bands.iter().any(|&n| !(1..=96).contains(&n)) {
         return Err(ConfigValidationIssue::new(
             "feature.num_bands",
-            "all values must be > 0",
+            "all values must be from 1 to 96",
         ));
     }
     if !feature.fmin.is_finite() || feature.fmin <= 0.0 {
@@ -172,10 +184,10 @@ pub fn validate_core_config(config: &CoreConfig) -> Result<(), ConfigValidationI
             "must contain at least one meter",
         ));
     }
-    if dbn.beats_per_bar.contains(&0) {
+    if dbn.beats_per_bar.iter().any(|&n| !(1..=32).contains(&n)) {
         return Err(ConfigValidationIssue::new(
             "dbn.beats_per_bar",
-            "all values must be > 0",
+            "all values must be from 1 to 32",
         ));
     }
     if !dbn.min_bpm.is_finite() || dbn.min_bpm <= 0.0 {
@@ -187,6 +199,20 @@ pub fn validate_core_config(config: &CoreConfig) -> Result<(), ConfigValidationI
             "must be > dbn.min_bpm",
         ));
     }
+    // The longest beat interval bounds the DBN state count (about its square).
+    if 60.0 * feature.fps / dbn.min_bpm > 1000.0 {
+        return Err(ConfigValidationIssue::new(
+            "dbn.min_bpm",
+            "must be >= 0.06 * feature.fps",
+        ));
+    }
+    // The shortest beat interval, rounded as the DBN rounds it, must be at least one frame.
+    if (60.0 * feature.fps as f64 / dbn.max_bpm as f64).round_ties_even() < 1.0 {
+        return Err(ConfigValidationIssue::new(
+            "dbn.max_bpm",
+            "must be < 120 * feature.fps",
+        ));
+    }
     if dbn.num_tempi == 0 {
         return Err(ConfigValidationIssue::new("dbn.num_tempi", "must be > 0"));
     }
@@ -196,10 +222,10 @@ pub fn validate_core_config(config: &CoreConfig) -> Result<(), ConfigValidationI
             "must be > 0",
         ));
     }
-    if dbn.observation_lambda == 0 {
+    if dbn.observation_lambda < 2 {
         return Err(ConfigValidationIssue::new(
             "dbn.observation_lambda",
-            "must be > 0",
+            "must be >= 2",
         ));
     }
     if !dbn.threshold.is_finite() || !(0.0..=1.0).contains(&dbn.threshold) {
