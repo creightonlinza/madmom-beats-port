@@ -5,7 +5,12 @@ Offline beat + downbeat detection ported from madmom into Rust for iOS/Android/W
 ## Status
 
 The Rust core (DSP, model inference, DBN decoding) matches the madmom reference
-implementation under `tools/regen/reference/madmom` on golden fixtures.
+implementation under `tools/regen/reference/madmom` on golden fixtures: same
+beat counts and bar positions, beat times within 1 ms. It
+uses no platform math library and no fused multiply-adds, so it computes the
+same results, bit for bit, on each platform checked so far (macOS arm64,
+x86-64, WASM; CI runs the bit-exact snapshot tests on Linux x86-64). See
+`PROVENANCE.md` for how closely they follow madmom's.
 
 ## Build
 
@@ -108,8 +113,9 @@ Goldens are written locally under `fixtures/golden/<fixture_name>/` as:
 - This repository is a composite distribution. Project-owned source code,
   scripts, docs, schemas, FFI bindings, and WASM wrappers are licensed
   **BSD 2-Clause** (see `LICENSE` and `LICENSES/BSD_2_CLAUSE.txt`).
-- The Rust core is a **port / derivative of madmom**, also BSD 2-Clause. The
-  upstream copyright notice is reproduced in `NOTICE`, which must ship with any
+- The Rust core is a **port / derivative of madmom**, also BSD 2-Clause. It
+  also contains NumPy code (BSD 3-Clause) and links the `libm` crate (MIT).
+  Their copyright notices are reproduced in `NOTICE`, which must ship with any
   source or binary redistribution (`.so`/`.a`/`.dylib`/`.wasm`).
 - Model assets under `models/` are **CC BY-NC-SA 4.0** (see
   `LICENSES/MODELS_CC_BY_NC_SA.txt`) and are **non-commercial only**. A checkout

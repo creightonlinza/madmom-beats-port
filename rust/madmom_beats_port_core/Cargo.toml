@@ -10,7 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 ndarray.workspace = true
 ndarray-npy.workspace = true
-rustfft = "6"
+libm = "=0.2.16"
 
 [dev-dependencies]
 anyhow = "1"

@@ -38,7 +38,7 @@
           "maxItems": 3,
           "items": {
             "type": "integer",
-            "minimum": 1
+            "enum": [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
           }
         },
         "num_bands": {
@@ -47,7 +47,8 @@
           "maxItems": 3,
           "items": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 96
           }
         },
         "fmin": {
@@ -65,6 +66,11 @@
         },
         "positive_diffs": {
           "type": "boolean"
+        },
+        "int16_scaling": {
+          "type": "boolean",
+          "default": false,
+          "description": "Samples are 16-bit PCM passed as i16 / 32768; scale them as madmom scales a 16-bit signal (by 1 / 32767) instead of as floats."
         }
       }
     },
@@ -105,7 +111,8 @@
           "minItems": 1,
           "items": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 32
           }
         },
         "min_bpm": {
@@ -126,7 +133,7 @@
         },
         "observation_lambda": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 2
         },
         "threshold": {
           "type": "number",

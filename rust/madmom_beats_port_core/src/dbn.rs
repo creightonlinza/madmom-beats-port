@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 // Ported from madmom (BSD 2-Clause, Copyright (c) 2012-2014 JKU / OFAI). See NOTICE.
 
+use crate::numeric;
 use crate::types::{ActivationOutput, BeatEvent, ProgressEvent, ProgressSink, ProgressStage};
 use crate::{CoreConfig, RhythmError};
 use std::mem::size_of;
@@ -107,7 +108,7 @@ pub fn decode_scored(
     let mut previous_time: Option<f32> = None;
     for (event_idx, &idx) in beat_indices.iter().enumerate() {
         let raw_time_sec = ((idx + first) as f32) / fps;
-        let mut time_sec = (refined_indices[event_idx] + first as f32) / fps;
+        let mut time_sec = ((refined_indices[event_idx] + first as f64) / fps as f64) as f32;
         // Keep output strictly time-ascending and deterministic.
         if let Some(prev) = previous_time {
             if time_sec <= prev {
@@ -147,7 +148,8 @@ fn threshold_activations(data: &[[f32; 2]], threshold: f32) -> (Vec<[f32; 2]>, u
             last = i + 1;
         }
     }
-    if !found {
+    // madmom tests the indices with `idx.any()`, which is false when frame 0 is the only one.
+    if !found || last == 1 {
         return (Vec::new(), 0);
     }
     (data[first..last].to_vec(), first)
@@ -157,7 +159,10 @@ fn frame_energy(activations: &[[f32; 2]]) -> Vec<f32> {
     activations.iter().map(|v| v[0] + v[1]).collect()
 }
 
-fn refine_beat_indices(indices: &[usize], activations: &[[f32; 2]]) -> (Vec<f32>, Vec<usize>) {
+/// Sub-frame beat positions from a parabola through the energy around each
+/// beat's peak frame. The parabola is computed in single precision and added
+/// to the frame index in double precision, as `generate_golden.py` does.
+fn refine_beat_indices(indices: &[usize], activations: &[[f32; 2]]) -> (Vec<f64>, Vec<usize>) {
     let energy = frame_energy(activations);
     let count = energy.len();
     let mut refined = Vec::with_capacity(indices.len());
@@ -165,7 +170,7 @@ fn refine_beat_indices(indices: &[usize], activations: &[[f32; 2]]) -> (Vec<f32>
 
     for &idx in indices {
         if idx == 0 || idx + 1 >= count {
-            refined.push(idx as f32);
+            refined.push(idx as f64);
             peaks.push(idx);
             continue;
         }
@@ -183,20 +188,20 @@ fn refine_beat_indices(indices: &[usize], activations: &[[f32; 2]]) -> (Vec<f32>
         peaks.push(peak);
 
         if peak == 0 || peak + 1 >= count {
-            refined.push(peak as f32);
+            refined.push(peak as f64);
             continue;
         }
 
-        let y1 = energy[peak - 1] as f64;
-        let y2 = energy[peak] as f64;
-        let y3 = energy[peak + 1] as f64;
+        let y1 = energy[peak - 1];
+        let y2 = energy[peak];
+        let y3 = energy[peak + 1];
         let denom = y1 - 2.0 * y2 + y3;
-        if denom.abs() < 1e-12 {
-            refined.push(peak as f32);
+        if (denom.abs() as f64) < 1e-12 {
+            refined.push(peak as f64);
             continue;
         }
         let delta = (0.5 * (y1 - y3) / denom).clamp(-0.5, 0.5);
-        refined.push(peak as f32 + delta as f32);
+        refined.push(peak as f64 + delta as f64);
     }
 
     (refined, peaks)
@@ -279,13 +284,13 @@ fn build_hmms(config: &CoreConfig) -> Result<Vec<HiddenMarkovModel>, RhythmError
     let num_tempi = config.dbn.num_tempi;
     let transition_lambda = config.dbn.transition_lambda;
 
-    let min_interval = 60.0 * config.feature.fps / max_bpm;
-    let max_interval = 60.0 * config.feature.fps / min_bpm;
+    let min_interval = 60.0 * config.feature.fps as f64 / max_bpm as f64;
+    let max_interval = 60.0 * config.feature.fps as f64 / min_bpm as f64;
 
     let mut hmms = Vec::new();
     for &beats in beats_per_bar {
         let st = BarStateSpace::new(beats, min_interval, max_interval, Some(num_tempi))?;
-        let tm = BarTransitionModel::new(&st, vec![Some(transition_lambda); st.num_beats])?;
+        let tm = BarTransitionModel::new(&st, transition_lambda as f64)?;
         let om = ObservationModel::new(&st, config.dbn.observation_lambda)?;
         hmms.push(HiddenMarkovModel::new(tm, om));
     }
@@ -294,7 +299,7 @@ fn build_hmms(config: &CoreConfig) -> Result<Vec<HiddenMarkovModel>, RhythmError
 
 struct BeatStateSpace {
     num_states: usize,
-    state_positions: Vec<f32>,
+    state_positions: Vec<f64>,
     state_intervals: Vec<usize>,
     first_states: Vec<usize>,
     last_states: Vec<usize>,
@@ -302,12 +307,13 @@ struct BeatStateSpace {
 
 impl BeatStateSpace {
     fn new(
-        min_interval: f32,
-        max_interval: f32,
+        min_interval: f64,
+        max_interval: f64,
         num_intervals: Option<usize>,
     ) -> Result<Self, RhythmError> {
-        let mut intervals: Vec<usize> =
-            ((min_interval.round() as usize)..=(max_interval.round() as usize)).collect();
+        let mut intervals: Vec<usize> = ((min_interval.round_ties_even() as usize)
+            ..=(max_interval.round_ties_even() as usize))
+            .collect();
         if let Some(target) = num_intervals {
             if target < intervals.len() {
                 let mut num_log = target;
@@ -332,8 +338,10 @@ impl BeatStateSpace {
         for &interval in &intervals {
             first_states.push(idx);
             last_states.push(idx + interval - 1);
+            // np.linspace(0, 1, interval, endpoint=False)
+            let step = 1.0 / interval as f64;
             for i in 0..interval {
-                state_positions[idx + i] = (i as f32) / (interval as f32);
+                state_positions[idx + i] = i as f64 * step;
                 state_intervals[idx + i] = interval;
             }
             idx += interval;
@@ -352,7 +360,7 @@ impl BeatStateSpace {
 struct BarStateSpace {
     num_beats: usize,
     num_states: usize,
-    state_positions: Vec<f32>,
+    state_positions: Vec<f64>,
     state_intervals: Vec<usize>,
     first_states: Vec<Vec<usize>>,
     last_states: Vec<Vec<usize>>,
@@ -361,8 +369,8 @@ struct BarStateSpace {
 impl BarStateSpace {
     fn new(
         num_beats: usize,
-        min_interval: f32,
-        max_interval: f32,
+        min_interval: f64,
+        max_interval: f64,
         num_intervals: Option<usize>,
     ) -> Result<Self, RhythmError> {
         let bss = BeatStateSpace::new(min_interval, max_interval, num_intervals)?;
@@ -373,7 +381,7 @@ impl BarStateSpace {
         let mut offset = 0usize;
         for beat in 0..num_beats {
             for &pos in &bss.state_positions {
-                state_positions.push(pos + beat as f32);
+                state_positions.push(pos + beat as f64);
             }
             state_intervals.extend_from_slice(&bss.state_intervals);
             first_states.push(bss.first_states.iter().map(|v| v + offset).collect());
@@ -399,7 +407,7 @@ struct ObservationModel {
 
 impl ObservationModel {
     fn new(state_space: &BarStateSpace, observation_lambda: usize) -> Result<Self, RhythmError> {
-        let border = 1.0 / observation_lambda as f32;
+        let border = 1.0 / observation_lambda as f64;
         let mut pointers = vec![0usize; state_space.num_states];
         for (i, pos) in state_space.state_positions.iter().enumerate() {
             let beat_pos = pos % 1.0;
@@ -416,18 +424,19 @@ impl ObservationModel {
         })
     }
 
+    /// f32 logs as madmom computes them; madmom's NaN for a negative value acts as -inf in Viterbi.
     fn log_densities(&self, observations: &[[f32; 2]]) -> Vec<[f64; 3]> {
+        let log = |v: f32| -> f64 {
+            if v > 0.0 {
+                numeric::ln(v) as f64
+            } else {
+                f64::NEG_INFINITY
+            }
+        };
         let mut out = Vec::with_capacity(observations.len());
-        for obs in observations {
-            let beat = obs[0] as f64;
-            let downbeat = obs[1] as f64;
-            let sum = beat + downbeat;
-            let none = (1.0 - sum) / (self.observation_lambda as f64 - 1.0);
-            out.push([
-                log_or_neg_inf(none),
-                log_or_neg_inf(beat),
-                log_or_neg_inf(downbeat),
-            ]);
+        for &[beat, downbeat] in observations {
+            let none = (1.0 - (beat + downbeat)) / (self.observation_lambda - 1) as f32;
+            out.push([log(none), log(beat), log(downbeat)]);
         }
         out
     }
@@ -446,15 +455,7 @@ struct BarTransitionModel {
 }
 
 impl BarTransitionModel {
-    fn new(
-        state_space: &BarStateSpace,
-        transition_lambda: Vec<Option<f32>>,
-    ) -> Result<Self, RhythmError> {
-        if transition_lambda.len() != state_space.num_beats {
-            return Err(RhythmError::InvalidInput(
-                "transition_lambda length mismatch".to_string(),
-            ));
-        }
+    fn new(state_space: &BarStateSpace, transition_lambda: f64) -> Result<Self, RhythmError> {
         let mut states = Vec::new();
         let mut prev_states = Vec::new();
         let mut probabilities = Vec::new();
@@ -468,11 +469,7 @@ impl BarTransitionModel {
             }
         }
 
-        for (beat, lambda) in transition_lambda
-            .iter()
-            .enumerate()
-            .take(state_space.num_beats)
-        {
+        for beat in 0..state_space.num_beats {
             let to_states = &state_space.first_states[beat];
             let from_states = &state_space.last_states
                 [(beat + state_space.num_beats - 1) % state_space.num_beats];
@@ -484,7 +481,7 @@ impl BarTransitionModel {
                 .iter()
                 .map(|s| state_space.state_intervals[*s])
                 .collect();
-            let prob = exponential_transition(&from_int, &to_int, *lambda);
+            let prob = exponential_transition(&from_int, &to_int, transition_lambda);
             for (i_from, row) in prob.iter().enumerate() {
                 for (i_to, p) in row.iter().enumerate() {
                     if *p > 0.0 {
@@ -589,7 +586,11 @@ impl HiddenMarkovModel {
         }
         let branching_density: Vec<usize> = branching.iter().map(|&s| density_index[s]).collect();
 
-        let mut previous: Vec<f64> = self.initial_distribution.iter().map(|v| v.ln()).collect();
+        let mut previous: Vec<f64> = self
+            .initial_distribution
+            .iter()
+            .map(|&v| libm::log(v))
+            .collect();
         let mut current = vec![f64::NEG_INFINITY; num_states];
         for (frame, dens) in log_densities.iter().enumerate() {
             let row = &mut choices[frame * branching.len()..(frame + 1) * branching.len()];
@@ -663,7 +664,11 @@ impl HiddenMarkovModel {
         }
         let log_densities = self.observation_model.log_densities(observations);
 
-        let mut previous: Vec<f64> = self.initial_distribution.iter().map(|v| v.ln()).collect();
+        let mut previous: Vec<f64> = self
+            .initial_distribution
+            .iter()
+            .map(|&v| libm::log(v))
+            .collect();
         let mut current = vec![f64::NEG_INFINITY; num_states];
 
         let num_blocks = num_frames.div_ceil(BLOCK_FRAMES);
@@ -907,32 +912,20 @@ fn allocate_backpointers(num_states: usize, num_frames: usize) -> Result<Vec<u32
     Ok(bt)
 }
 
+/// madmom's `exponential_transition` in f64 (`np.spacing(1)` cutoff, NumPy row sums).
 fn exponential_transition(
     from_intervals: &[usize],
     to_intervals: &[usize],
-    transition_lambda: Option<f32>,
-) -> Vec<Vec<f32>> {
-    if transition_lambda.is_none() {
-        let mut prob = vec![vec![0.0; to_intervals.len()]; from_intervals.len()];
-        for (i, from) in from_intervals.iter().enumerate() {
-            for (j, to) in to_intervals.iter().enumerate() {
-                if from == to {
-                    prob[i][j] = 1.0;
-                }
-            }
-        }
-        return prob;
-    }
-    let lambda = transition_lambda.unwrap();
+    lambda: f64,
+) -> Vec<Vec<f64>> {
     let mut prob = vec![vec![0.0; to_intervals.len()]; from_intervals.len()];
     for (i, from) in from_intervals.iter().enumerate() {
-        let mut sum = 0.0f32;
         for (j, to) in to_intervals.iter().enumerate() {
-            let ratio = (*to as f32) / (*from as f32);
-            let v = (-lambda * (ratio - 1.0).abs()).exp();
-            prob[i][j] = v;
-            sum += v;
+            let ratio = (*to as f64) / (*from as f64);
+            let v = libm::exp(-lambda * (ratio - 1.0).abs());
+            prob[i][j] = if v <= f64::EPSILON { 0.0 } else { v };
         }
+        let sum = numeric::pairwise_sum(&prob[i]);
         if sum > 0.0 {
             for p in prob[i].iter_mut() {
                 *p /= sum;
@@ -947,10 +940,10 @@ type SparseTransition = (Vec<usize>, Vec<usize>, Vec<f64>);
 fn make_sparse(
     states: &[usize],
     prev_states: &[usize],
-    probabilities: &[f32],
+    probabilities: &[f64],
 ) -> Result<SparseTransition, RhythmError> {
     let num_states = prev_states.iter().copied().max().unwrap_or(0) + 1;
-    let mut sums = vec![0.0f32; num_states];
+    let mut sums = vec![0.0f64; num_states];
     for (&p, &prob) in prev_states.iter().zip(probabilities.iter()) {
         sums[p] += prob;
     }
@@ -968,7 +961,7 @@ fn make_sparse(
         .zip(prev_states.iter())
         .zip(probabilities.iter())
     {
-        per_state[state].push((prev, prob as f64));
+        per_state[state].push((prev, prob));
     }
     let mut out_states = Vec::new();
     let mut pointers = Vec::with_capacity(num_states + 1);
@@ -990,31 +983,37 @@ fn log_or_neg_inf(v: f64) -> f64 {
     if v <= 0.0 {
         f64::NEG_INFINITY
     } else {
-        v.ln()
+        libm::log(v)
     }
 }
 
-fn logspace_intervals(min_interval: f32, max_interval: f32, count: usize) -> Vec<usize> {
-    let mut out = Vec::with_capacity(count);
-    let min = min_interval as f64;
-    let max = max_interval as f64;
-    let log_min = min.log2();
-    let log_max = max.log2();
+/// `np.round(np.logspace(np.log2(min), np.log2(max), count, base=2))`.
+fn logspace_intervals(min_interval: f64, max_interval: f64, count: usize) -> Vec<usize> {
+    let start = libm::log2(min_interval);
+    let stop = libm::log2(max_interval);
     if count == 1 {
-        out.push(min_interval.round() as usize);
-        return out;
+        return vec![libm::pow(2.0, start).round_ties_even() as usize];
     }
-    for i in 0..count {
-        let t = i as f64 / (count as f64 - 1.0);
-        let v = 2f64.powf(log_min + t * (log_max - log_min));
-        out.push(v.round() as usize);
-    }
-    out
+    // np.linspace(start, stop, count): `i * step + start`, the last one `stop`.
+    let step = (stop - start) / (count - 1) as f64;
+    (0..count)
+        .map(|i| {
+            let exponent = if i + 1 == count {
+                stop
+            } else {
+                i as f64 * step + start
+            };
+            libm::pow(2.0, exponent).round_ties_even() as usize
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_hmms, decode, decode_scored, DbnProgressTracker, VITERBI_PROGRESS_FRAMES};
+    use super::{
+        build_hmms, decode, decode_scored, threshold_activations, DbnProgressTracker,
+        VITERBI_PROGRESS_FRAMES,
+    };
     use crate::types::{ActivationOutput, ProgressEvent, ProgressSink, ProgressStage};
     use crate::CoreConfig;
 
@@ -1278,5 +1277,13 @@ mod tests {
                 "DBN progress should be monotonic"
             );
         }
+    }
+
+    #[test]
+    fn threshold_ignores_frame_zero_alone() {
+        assert!(threshold_activations(&[[0.9, 0.0], [0.0, 0.0]], 0.5)
+            .0
+            .is_empty());
+        assert_eq!(threshold_activations(&[[0.0, 0.0], [0.9, 0.0]], 0.5).1, 1);
     }
 }

@@ -4,8 +4,11 @@ use madmom_beats_port_core::{analyze, CoreConfig};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-const FRAME_TOLERANCE_SEC: f32 = 0.005;
-const CONFIDENCE_TOLERANCE: f32 = 0.01;
+// The goldens are madmom's results on macOS arm64. The port computes the same
+// bits on every platform, so it differs from them in the last bits of some
+// activations, which moves a few beat times by up to about 0.14 ms.
+const TIME_TOLERANCE_SEC: f32 = 0.001;
+const CONFIDENCE_TOLERANCE: f32 = 0.005;
 
 #[derive(Debug, Deserialize)]
 struct GoldenEvents {
@@ -32,41 +35,37 @@ fn repo_root() -> PathBuf {
     fixtures_root().parent().unwrap().to_path_buf()
 }
 
-fn load_wav_mono(path: &PathBuf) -> (Vec<f32>, u32) {
+/// Mono samples as madmom loads the wav, and whether they are 16-bit PCM
+/// (`int16_scaling`). madmom keeps a 16-bit signal as integers and downmixes
+/// it to the channel mean truncated to an integer; float samples are
+/// averaged as floats.
+fn load_wav_mono(path: &PathBuf) -> (Vec<f32>, bool) {
     let mut reader = hound::WavReader::open(path).expect("failed to open wav");
     let spec = reader.spec();
     assert_eq!(spec.sample_rate, 44_100, "unexpected sample rate");
     let channels = spec.channels as usize;
-    let mut samples = Vec::new();
-
-    match spec.sample_format {
-        hound::SampleFormat::Int => {
-            let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
-            let mut frame = Vec::with_capacity(channels);
-            for s in reader.samples::<i32>() {
-                let v = s.expect("invalid sample") as f32 / max;
-                frame.push(v);
-                if frame.len() == channels {
-                    let sum: f32 = frame.iter().sum();
-                    samples.push(sum / channels as f32);
-                    frame.clear();
-                }
-            }
+    match (spec.sample_format, spec.bits_per_sample) {
+        (hound::SampleFormat::Int, 16) => {
+            let raw: Vec<i32> = reader.samples::<i16>().map(|s| s.unwrap() as i32).collect();
+            let samples = raw
+                .chunks_exact(channels)
+                .map(|frame| {
+                    let mean = frame.iter().sum::<i32>() as f64 / channels as f64;
+                    mean.trunc() as f32 / 32768.0
+                })
+                .collect();
+            (samples, true)
         }
-        hound::SampleFormat::Float => {
-            let mut frame = Vec::with_capacity(channels);
-            for s in reader.samples::<f32>() {
-                let v = s.expect("invalid sample");
-                frame.push(v);
-                if frame.len() == channels {
-                    let sum: f32 = frame.iter().sum();
-                    samples.push(sum / channels as f32);
-                    frame.clear();
-                }
-            }
+        (hound::SampleFormat::Float, 32) => {
+            let raw: Vec<f32> = reader.samples::<f32>().map(|s| s.unwrap()).collect();
+            let samples = raw
+                .chunks_exact(channels)
+                .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+                .collect();
+            (samples, false)
         }
+        (format, bits) => panic!("unsupported wav format {format:?} {bits}-bit"),
     }
-    (samples, spec.sample_rate)
 }
 
 fn load_events(path: &PathBuf) -> GoldenEvents {
@@ -74,34 +73,12 @@ fn load_events(path: &PathBuf) -> GoldenEvents {
     serde_json::from_str(&data).expect("invalid events.json")
 }
 
-fn compare_event_times(expected: &[f32], actual: &[f32], label: &str) {
-    assert_eq!(
-        expected.len(),
-        actual.len(),
-        "event count mismatch for {}",
-        label
-    );
+fn assert_close(expected: &[f32], actual: &[f32], tolerance: f32, label: &str) {
+    assert_eq!(expected.len(), actual.len(), "{label} count mismatch");
     for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
-        let diff = (e - a).abs();
         assert!(
-            diff <= FRAME_TOLERANCE_SEC,
-            "event {} in {} differs by {}s",
-            i,
-            label,
-            diff
-        );
-    }
-}
-
-fn compare_confidences(expected: &[f32], actual: &[f32]) {
-    assert_eq!(expected.len(), actual.len(), "confidence count mismatch");
-    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
-        let diff = (e - a).abs();
-        assert!(
-            diff <= CONFIDENCE_TOLERANCE,
-            "confidence {} differs by {}",
-            i,
-            diff
+            (e - a).abs() <= tolerance,
+            "{label} {i}: expected {e}, got {a}"
         );
     }
 }
@@ -144,8 +121,9 @@ fn golden_parity_all() {
         let events_path = golden_dir.join("events.json");
 
         println!("fixture {}: loading audio", name);
-        let (samples, sample_rate) = load_wav_mono(&audio_path);
-        let duration_sec = samples.len() as f32 / sample_rate as f32;
+        let (samples, int16_scaling) = load_wav_mono(&audio_path);
+        config.feature.int16_scaling = int16_scaling;
+        let duration_sec = samples.len() as f32 / config.feature.sample_rate as f32;
         println!(
             "fixture {}: analyzing ({} samples, {:.1}s)",
             name,
@@ -165,7 +143,12 @@ fn golden_parity_all() {
         println!("fixture {}: loading goldens", name);
         let events = load_events(&events_path);
         let beat_times_gold: Vec<f32> = events.beats.iter().map(|b| b.time_sec).collect();
-        compare_event_times(&beat_times_gold, &output.beat_times, "beats");
+        assert_close(
+            &beat_times_gold,
+            &output.beat_times,
+            TIME_TOLERANCE_SEC,
+            "beat time",
+        );
 
         let beat_numbers_gold: Vec<u32> = events.beats.iter().map(|b| b.beat_in_bar).collect();
         assert_eq!(
@@ -175,7 +158,12 @@ fn golden_parity_all() {
         );
 
         let beat_conf_gold: Vec<f32> = events.beats.iter().map(|b| b.confidence).collect();
-        compare_confidences(&beat_conf_gold, &output.beat_confidences);
+        assert_close(
+            &beat_conf_gold,
+            &output.beat_confidences,
+            CONFIDENCE_TOLERANCE,
+            "confidence",
+        );
 
         assert_eq!(
             output.beat_times.len(),

@@ -11,8 +11,10 @@ regenerate `models/` and `fixtures/golden/` when necessary.
 - Apply local madmom patches:
   - `git -C tools/regen/reference/madmom apply ../../patches/madmom-submodule.patch`
 
-Optional (faster DBN decode):
-- Build madmom C extensions from `tools/regen/reference/madmom`
+- Build madmom C extensions in `tools/regen/reference/madmom`:
+  `(cd tools/regen/reference/madmom && ../../../../.venv/bin/python setup.py build_ext --inplace)`. The goldens in
+  `PROVENANCE.md` were made with them; the pure-Python `hmm.py` fallback is a
+  separate Viterbi implementation.
 
 ## Regenerate models
 
